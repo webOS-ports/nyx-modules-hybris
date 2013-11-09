@@ -22,6 +22,6 @@ project(nyx-modules-hybris)
 
 include(webOS/webOS)
 webos_modules_init(1 0 0 QUALIFIER RC4)
-webos_component(6 0 0)
+webos_component(0 1 0)
 
 add_subdirectory(src)
