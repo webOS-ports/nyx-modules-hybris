@@ -24,7 +24,6 @@
 
 #include <android/system/window.h>
 #include <android/hardware/lights.h>
-#include <android/hardware/fb.h>
 
 #include <nyx/nyx_module.h>
 #include <nyx/module/nyx_utils.h>
@@ -33,9 +32,6 @@ NYX_DECLARE_MODULE(NYX_DEVICE_LED_CONTROLLER, "LedControllers");
 
 static const struct hw_module_t *lights_module = 0;
 static struct light_device_t *backlight_device = 0;
-
-static const struct hw_module_t *framebuffer_module = 0;
-static struct framebuffer_device_t *framebuffer_device = 0;
 
 unsigned int backlight_brightness = 0;
 bool backlight_power = true;
@@ -106,8 +102,13 @@ static bool hybris_light_set_brightness(struct light_device_t *device, int level
     state.flashOffMS = 0;
     state.brightnessMode = BRIGHTNESS_MODE_USER;
 
+    nyx_debug("Set light brightness to %i (%i) ...", normalized_level, level);
+
     if (device->set_light(device, &state) < 0)
+    {
+        nyx_error("Failed to set brightness for light (level %i)", level);
         return false;
+    }
 
     return true;
 }
@@ -142,51 +143,6 @@ static bool hybris_light_set_pattern(struct light_device_t *device, int r, int g
     return true;
 }
 
-static bool hybris_framebuffer_init(void)
-{
-    if (!framebuffer_module)
-    {
-        hw_get_module(GRALLOC_HARDWARE_FB0, &framebuffer_module);
-        if (!framebuffer_module)
-        {
-            nyx_error("Failed to open framebuffer hardware abstraction module");
-            return false;
-        }
-    }
-
-    if (framebuffer_device)
-        return true;
-
-    framebuffer_open(framebuffer_module, &framebuffer_device);
-    if (!framebuffer_device)
-    {
-        nyx_error("Failed to open framebuffer device");
-        return false;
-    }
-
-    return true;
-}
-
-static bool hybris_framebuffer_set_power(bool state)
-{
-    if (!framebuffer_device)
-        return false;
-
-    if (framebuffer_device->enableScreen(framebuffer_device, state) < 0)
-        return false;
-
-    return true;
-}
-
-static void hybris_framebuffer_release(void)
-{
-    if (framebuffer_device)
-    {
-        framebuffer_close(framebuffer_device);
-        framebuffer_device = 0;
-    }
-}
-
 nyx_error_t nyx_module_open (nyx_instance_t i, nyx_device_t** d)
 {
     nyx_device_t *nyxDev = (nyx_device_t*)calloc(sizeof(nyx_device_t), 1);
@@ -218,10 +174,6 @@ nyx_error_t nyx_module_open (nyx_instance_t i, nyx_device_t** d)
     backlight_brightness = 50;
     hybris_light_set_brightness(backlight_device, backlight_brightness);
 
-    backlight_power = true;
-    hybris_framebuffer_set_power(backlight_power);
-
-    hybris_framebuffer_init();
     return NYX_ERROR_NONE;
 }
 
@@ -231,8 +183,6 @@ nyx_error_t nyx_module_close (nyx_device_t* d)
 
     hybris_light_release(backlight_device);
     backlight_device = 0;
-
-    hybris_framebuffer_release();
 
     return NYX_ERROR_NONE;
 }
@@ -247,19 +197,17 @@ static nyx_error_t handle_backlight_effect(nyx_device_handle_t handle, nyx_led_c
     case NYX_LED_CONTROLLER_EFFECT_LED_SET:
         brightness = effect.backlight.brightness_lcd;
 
+        nyx_debug("Adjusting backlight: brightness %i power %s",
+                  brightness, backlight_power ? "on" : "off");
+
         if (!hybris_light_set_brightness(backlight_device, brightness))
         {
             status = NYX_CALLBACK_STATUS_FAILED;
             goto done;
         }
 
-        if (brightness == 0 && backlight_power)
-            hybris_framebuffer_set_power(false);
-        else if (brightness > 0 && !backlight_power)
-            hybris_framebuffer_set_power(true);
-
-        backlight_power = (brightness > 0);
         backlight_brightness = brightness;
+
         break;
     default:
         break;
@@ -285,11 +233,9 @@ nyx_error_t led_controller_execute_effect(nyx_device_handle_t handle, nyx_led_co
 
 nyx_error_t led_controller_get_state(nyx_device_handle_t handle, nyx_led_controller_led_t led, nyx_led_controller_state_t *state)
 {
-    int brightness = 0;
-
     switch (led) {
     case NYX_LED_CONTROLLER_BACKLIGHT_LEDS:
-        *state = brightness > 0 ? NYX_LED_CONTROLLER_STATE_ON : NYX_LED_CONTROLLER_STATE_OFF;
+        *state = backlight_brightness > 0 ? NYX_LED_CONTROLLER_STATE_ON : NYX_LED_CONTROLLER_STATE_OFF;
         return NYX_ERROR_NONE;
     default:
         break;
