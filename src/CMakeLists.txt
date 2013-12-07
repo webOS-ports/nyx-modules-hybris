@@ -29,6 +29,15 @@ webos_add_compiler_flags(ALL ${NYXLIB_CFLAGS_OTHER})
 pkg_check_modules(ANDROID_HEADERS REQUIRED android-headers)
 include_directories(${ANDROID_HEADERS_INCLUDE_DIRS})
 
+# FIXME once we have updated to a newer libhybris version we should use the pkgconfig file
+# for libandroid-properties
+# pkg_check_modules(ANDROID_PROPERTIES REQUIRED libandroid-properties)
+# include_directories(ANDROID_PROPERTIES_INCLUDE_DIRS)
+
+pkg_check_modules(LIBCRYPTO REQUIRED libcrypto)
+include_directories(${LIBCRYPTO_INCLUDE_DIRS})
+webos_add_compiler_flags(ALL ${LIBCRYPTO_CFLAGS_OTHER})
+
 webos_add_linker_options(ALL --no-undefined --as-needed)
 webos_add_compiler_flags(ALL -Wall -g -std=c99)
 webos_add_compiler_flags(ALL -D_GNU_SOURCE=1)
@@ -73,3 +82,4 @@ macro(nyx_create_module module)
 endmacro()
 
 add_subdirectory(led_controller)
+add_subdirectory(device_info)
