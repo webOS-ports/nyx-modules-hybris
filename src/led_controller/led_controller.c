@@ -33,9 +33,6 @@ NYX_DECLARE_MODULE(NYX_DEVICE_LED_CONTROLLER, "LedControllers");
 static const struct hw_module_t *lights_module = 0;
 static struct light_device_t *backlight_device = 0;
 
-unsigned int backlight_brightness = 0;
-bool backlight_power = true;
-
 static int light_device_open(const struct hw_module_t* module, const char *id,
                              struct light_device_t** device)
 {
@@ -170,10 +167,6 @@ nyx_error_t nyx_module_open (nyx_instance_t i, nyx_device_t** d)
         return NYX_ERROR_DEVICE_UNAVAILABLE;
     }
 
-    // set initial backlight brightness so we now where we start
-    backlight_brightness = 50;
-    hybris_light_set_brightness(backlight_device, backlight_brightness);
-
     return NYX_ERROR_NONE;
 }
 
@@ -197,16 +190,14 @@ static nyx_error_t handle_backlight_effect(nyx_device_handle_t handle, nyx_led_c
     case NYX_LED_CONTROLLER_EFFECT_LED_SET:
         brightness = effect.backlight.brightness_lcd;
 
-        nyx_debug("Adjusting backlight: brightness %i power %s",
-                  brightness, backlight_power ? "on" : "off");
+        nyx_debug("Adjusting backlight: brightness %i",
+                  brightness);
 
         if (!hybris_light_set_brightness(backlight_device, brightness))
         {
             status = NYX_CALLBACK_STATUS_FAILED;
             goto done;
         }
-
-        backlight_brightness = brightness;
 
         break;
     default:
@@ -233,13 +224,5 @@ nyx_error_t led_controller_execute_effect(nyx_device_handle_t handle, nyx_led_co
 
 nyx_error_t led_controller_get_state(nyx_device_handle_t handle, nyx_led_controller_led_t led, nyx_led_controller_state_t *state)
 {
-    switch (led) {
-    case NYX_LED_CONTROLLER_BACKLIGHT_LEDS:
-        *state = backlight_brightness > 0 ? NYX_LED_CONTROLLER_STATE_ON : NYX_LED_CONTROLLER_STATE_OFF;
-        return NYX_ERROR_NONE;
-    default:
-        break;
-    }
-
     return NYX_ERROR_DEVICE_UNAVAILABLE;
 }
