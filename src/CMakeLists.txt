@@ -29,6 +29,10 @@ webos_add_compiler_flags(ALL ${NYXLIB_CFLAGS_OTHER})
 pkg_check_modules(ANDROID_HEADERS REQUIRED android-headers)
 include_directories(${ANDROID_HEADERS_INCLUDE_DIRS})
 
+pkg_check_modules(LIBEVDEV REQUIRED libevdev)
+include_directories(${LIBEVDEV_INCLUDE_DIRS})
+webos_add_compiler_flags(ALL ${LIBEVDEV_CLFAGS_OTHER})
+
 # FIXME once we have updated to a newer libhybris version we should use the pkgconfig file
 # for libandroid-properties
 # pkg_check_modules(ANDROID_PROPERTIES REQUIRED libandroid-properties)
@@ -83,3 +87,4 @@ endmacro()
 
 add_subdirectory(led_controller)
 add_subdirectory(device_info)
+add_subdirectory(system)
