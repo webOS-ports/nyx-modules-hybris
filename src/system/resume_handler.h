@@ -18,18 +18,13 @@
 #ifndef RESUME_HANDLER_H_
 #define RESUME_HANDLER_H_
 
+#include <stdbool.h>
+
 void wakeup_system(const char *reason, const char *wakelock_to_release);
+bool is_system_suspended(void);
 
 int power_key_resume_handler_init(void);
 void power_key_resume_handler_release(void);
-
-#if 0
-int rtc_resume_handler_init(void);
-void rtc_resume_handler_release(void);
-
-int usb_resume_handler_init(void);
-void usb_resume_handler_release(void);
-#endif
 
 #endif
 

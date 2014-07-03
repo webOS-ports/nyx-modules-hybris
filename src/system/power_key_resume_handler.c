@@ -44,6 +44,9 @@ gboolean _handle_input_event(GIOChannel *channel, GIOCondition condition, gpoint
 	if ((condition  & G_IO_IN) != G_IO_IN)
 		return TRUE;
 
+	if (!is_system_suspended())
+		return TRUE;
+
 	libsuspend_acquire_wake_lock("wakelockd_handle_input_event");
 
 	bytesread = read(input_source_fd, &ev, sizeof(struct input_event));
@@ -88,6 +91,8 @@ int power_key_resume_handler_init(void)
 
 		if (g_file_test(node_path, G_FILE_TEST_IS_DIR))
 			continue;
+
+		g_message("Opening %s", full_path);
 
 		input_source_fd = open(full_path, O_RDONLY|O_NONBLOCK);
 		g_free(full_path);

@@ -19,6 +19,8 @@
 #include <glib.h>
 #include <stdbool.h>
 #include <libsuspend.h>
+#include <stdio.h>
+#include <string.h>
 
 #include "resume_handler.h"
 
@@ -31,11 +33,13 @@ bool suspended = false;
 GMainContext *suspend_context = NULL;
 GMainLoop *suspend_main_loop = NULL;
 
+bool is_system_suspended(void)
+{
+	return suspended;
+}
+
 void wakeup_system(const char *reason, const char *wakelock_to_release)
 {
-	if (!suspended)
-		return;
-
 	libsuspend_exit_suspend();
 
 	if (wakelock_to_release)
@@ -67,8 +71,6 @@ gpointer wakeup_thread_cb(gpointer user_data)
 
 bool suspend_init(void)
 {
-	GThread *wakeup_thread;
-
 	g_message("Initialization suspend");
 
 	wakeup_thread = g_thread_new(NULL, wakeup_thread_cb, NULL);
