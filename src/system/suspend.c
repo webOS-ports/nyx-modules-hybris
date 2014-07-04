@@ -26,7 +26,7 @@
 
 #define WAKEUP_SOURCE_PATH		"/tmp/wakeup_source"
 
-GThread *wakeup_thread;
+GThread *wakeup_thread = NULL;
 GMutex suspend_mutex;
 GCond suspend_cond;
 bool suspended = false;
@@ -73,11 +73,16 @@ bool suspend_init(void)
 {
 	g_message("Initialization suspend");
 
+	if (wakeup_thread != NULL)
+		return false;
+
 	wakeup_thread = g_thread_new(NULL, wakeup_thread_cb, NULL);
 
 	g_cond_init(&suspend_cond);
 
 	libsuspend_init(0);
+
+	return true;
 }
 
 bool suspend_enter(void)

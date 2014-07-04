@@ -41,6 +41,7 @@
 nyx_device_t *nyxDev;
 nyx_device_callback_function_t alarm_fired_callback = NULL;
 bool reformatted = false;
+bool suspend_initialized = false;
 
 NYX_DECLARE_MODULE(NYX_DEVICE_SYSTEM, "System");
 
@@ -94,8 +95,6 @@ nyx_error_t nyx_module_open(nyx_instance_t i, nyx_device_t **d)
 	nyx_module_register_method(i, (nyx_device_t *)nyxDev,
 	                           NYX_SYSTEM_ERASE_PARTITION_MODULE_METHOD,
 	                           "system_erase_partition");
-
-	suspend_init();
 
 	*d = (nyx_device_t *)nyxDev;
 	return NYX_ERROR_NONE;
@@ -192,6 +191,9 @@ nyx_error_t system_suspend(nyx_device_handle_t handle, bool *success)
 {
 	if (handle != nyxDev)
 		return NYX_ERROR_INVALID_HANDLE;
+
+	if (!suspend_initialized)
+		suspend_initialized = suspend_init();
 
 	*success = suspend_enter();
 
