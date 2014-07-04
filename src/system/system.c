@@ -33,6 +33,8 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <glib.h>
+#include <libsuspend.h>
+
 #include "rtc.h"
 
 #include <nyx/nyx_module.h>
@@ -41,7 +43,6 @@
 nyx_device_t *nyxDev;
 nyx_device_callback_function_t alarm_fired_callback = NULL;
 bool reformatted = false;
-bool suspend_initialized = false;
 
 NYX_DECLARE_MODULE(NYX_DEVICE_SYSTEM, "System");
 
@@ -81,8 +82,12 @@ nyx_error_t nyx_module_open(nyx_instance_t i, nyx_device_t **d)
 	                           "system_query_rtc_time");
 
 	nyx_module_register_method(i, (nyx_device_t *)nyxDev,
-	                           NYX_SYSTEM_SUSPEND_MODULE_METHOD,
-	                           "system_suspend");
+	                           NYX_SYSTEM_SUSPEND_ASYNC_MODULE_METHOD,
+	                           "system_suspend_async");
+
+	nyx_module_register_method(i, (nyx_device_t *)nyxDev,
+	                           NYX_SYSTEM_RESUME_MODULE_METHOD,
+	                           "system_resume");
 
 	nyx_module_register_method(i, (nyx_device_t *)nyxDev,
 	                           NYX_SYSTEM_SHUTDOWN_MODULE_METHOD,
@@ -96,6 +101,8 @@ nyx_error_t nyx_module_open(nyx_instance_t i, nyx_device_t **d)
 	                           NYX_SYSTEM_ERASE_PARTITION_MODULE_METHOD,
 	                           "system_erase_partition");
 
+	libsuspend_init(0);
+
 	*d = (nyx_device_t *)nyxDev;
 	return NYX_ERROR_NONE;
 }
@@ -103,7 +110,6 @@ nyx_error_t nyx_module_open(nyx_instance_t i, nyx_device_t **d)
 nyx_error_t nyx_module_close(nyx_device_t *d)
 {
 	rtc_close();
-	suspend_release();
 	return NYX_ERROR_NONE;
 }
 
@@ -187,15 +193,29 @@ nyx_error_t system_query_rtc_time(nyx_device_handle_t handle, time_t *time)
 }
 
 
-nyx_error_t system_suspend(nyx_device_handle_t handle, bool *success)
+nyx_error_t system_suspend_async(nyx_device_handle_t handle, bool *success)
 {
 	if (handle != nyxDev)
 		return NYX_ERROR_INVALID_HANDLE;
 
-	if (!suspend_initialized)
-		suspend_initialized = suspend_init();
+	libsuspend_prepare_suspend();
+	libsuspend_enter_suspend();
 
-	*success = suspend_enter();
+	if (success)
+		*success = true;
+
+	return NYX_ERROR_NONE;
+}
+
+nyx_error_t system_resume(nyx_device_handle_t handle, bool *success)
+{
+	if (handle != nyxDev)
+		return NYX_ERROR_INVALID_HANDLE;
+
+	libsuspend_exit_suspend();
+
+	if (success)
+		*success = true;
 
 	return NYX_ERROR_NONE;
 }

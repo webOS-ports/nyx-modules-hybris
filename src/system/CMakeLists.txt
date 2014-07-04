@@ -20,9 +20,7 @@ include_directories(.)
 
 nyx_create_module(SystemMain
 	system.c
-	rtc.c
-	suspend.c
-	power_key_resume_handler.c)
+	rtc.c)
 
 target_link_libraries(SystemMain
 	${GLIB2_LDFLAGS} ${GIO_LDFLAGS} ${NYXLIB_LDFLAGS}
