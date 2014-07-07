@@ -24,4 +24,4 @@ nyx_create_module(SystemMain
 
 target_link_libraries(SystemMain
 	${GLIB2_LDFLAGS} ${GIO_LDFLAGS} ${NYXLIB_LDFLAGS}
-	${LIBEVDEV_LDFLAGS} -lsuspend -lm -lrt -lpthread)
+	-lsuspend -lm -lrt -lpthread)
