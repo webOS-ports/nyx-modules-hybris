@@ -36,6 +36,7 @@ struct device_info {
 	char *nduid;
 	char *wifi_mac_address;
 	char *bt_mac_address;
+	char *modem_present;
 };
 
 #define MAC_ADDRESS_NUM_OCTETS		6
@@ -72,8 +73,20 @@ nyx_error_t device_info_query(nyx_device_handle_t device,
 	case NYX_DEVICE_INFO_STORAGE_FREE:
 	case NYX_DEVICE_INFO_RAM_SIZE:
 	case NYX_DEVICE_INFO_STORAGE_SIZE:
-	case NYX_DEVICE_INFO_MODEM_PRESENT:
 		error = NYX_ERROR_NOT_IMPLEMENTED;
+		break;
+
+	case NYX_DEVICE_INFO_MODEM_PRESENT:
+		if (dinfo->modem_present == NULL) {
+			property_get("rild.libpath", value, "");
+			if (strlen(value) == 0)
+				dinfo->modem_present = g_strdup("false");
+			else
+				dinfo->modem_present = g_strdup("true");
+		}
+
+		*dest = dinfo->modem_present;
+
 		break;
 
 	case NYX_DEVICE_INFO_BT_ADDR:
@@ -264,6 +277,9 @@ nyx_error_t nyx_module_close(nyx_device_handle_t device)
 
 	if (dinfo->bt_mac_address)
 		free(dinfo->bt_mac_address);
+
+	if (dinfo->modem_present)
+		free(dinfo->modem_present);
 
 	free(dinfo);
 
