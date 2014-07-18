@@ -93,7 +93,9 @@ nyx_error_t device_info_query(nyx_device_handle_t device,
 		if (dinfo->bt_mac_address == NULL) {
 			property_get("ro.bt.bdaddr_path", value, "");
 			if (strlen(value) == 0) {
-				error = NYX_ERROR_INVALID_OPERATION;
+				/* property doesn't exist or isn't filled so we will never get more
+				 * information here */
+				dinfo->bt_mac_address = g_strdup("");
 				break;
 			}
 
@@ -130,7 +132,9 @@ nyx_error_t device_info_query(nyx_device_handle_t device,
 		if (dinfo->wifi_mac_address == NULL) {
 			property_get("wifi.interface", value, "");
 			if (strlen(value) == 0) {
-				error = NYX_ERROR_INVALID_OPERATION;
+				/* property doesn't exist or isn't filled so we will never get more
+				 * information here */
+				dinfo->wifi_mac_address = g_strdup("");
 				break;
 			}
 
