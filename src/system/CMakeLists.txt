@@ -20,7 +20,8 @@ include_directories(.)
 
 nyx_create_module(SystemMain
 	system.c
-	rtc.c)
+	rtc.c
+	alarm.c)
 
 target_link_libraries(SystemMain
 	${GLIB2_LDFLAGS} ${GIO_LDFLAGS} ${NYXLIB_LDFLAGS}

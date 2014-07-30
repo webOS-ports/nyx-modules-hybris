@@ -39,6 +39,7 @@
 #include "wait.h"
 //#include "debug.h"
 #include "rtc.h"
+#include "alarm.h"
 
 #ifdef BUILD_FOR_DESKTOP
 #define DEV_RTC_IMPLEMENTED 0
@@ -119,9 +120,7 @@ rtc_open()
 #if DEV_RTC_IMPLEMENTED
 
 	if (rtc_fd >= 0)
-	{
 		return true;
-	}
 
 	rtc_fd = open("/dev/rtc", O_RDONLY);
 
@@ -137,6 +136,8 @@ rtc_open()
 			return false;
 		}
 	}
+
+	android_alarm_open();
 
 	return true;
 #else
@@ -223,6 +224,8 @@ rtc_close()
 		close(rtc_fd);
 		rtc_fd = -1;
 	}
+
+	android_alarm_close();
 }
 
 /**
@@ -332,8 +335,12 @@ rtc_set_alarm_time(time_t expiry)
 		expiry = now + 2;
 	}
 
+	/* Make sure we really wake up when in deep sleep */
+	android_alarm_set(expiry);
+
 	gmtime_r(&expiry, &tm_time);
 	tm_to_rtc_wkalrm(&tm_time, &alarm);
+
 	return rtc_set_alarm(&alarm);
 }
 
@@ -475,6 +482,8 @@ rtc_clear_alarm(void)
 			}
 		}
 	}
+
+	android_alarm_clear();
 
 	return true;
 error:
