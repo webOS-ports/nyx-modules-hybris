@@ -13,6 +13,7 @@ behind the nyx API based on libhybris.
 Currently supported are:
 
 * led controller
+* haptics
 
 How to Build on Linux
 =====================
