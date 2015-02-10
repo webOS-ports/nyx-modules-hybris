@@ -32,6 +32,7 @@ NYX_DECLARE_MODULE(NYX_DEVICE_LED_CONTROLLER, "LedControllers");
 
 static const struct hw_module_t *lights_module = 0;
 static struct light_device_t *backlight_device = 0;
+static struct light_device_t *notifications_device = 0;
 
 static int light_device_open(const struct hw_module_t* module, const char *id,
                              struct light_device_t** device)
@@ -61,12 +62,12 @@ static bool hybris_module_lights_load(void)
 
 static struct light_device_t* hybris_light_init(const char *id)
 {
-    struct light_device_t *device;
+    struct light_device_t *device = NULL ;
 
     if (!hybris_module_lights_load())
         return false;
 
-    light_device_open(lights_module, LIGHT_ID_BACKLIGHT, &device);
+    light_device_open(lights_module, id, &device);
     if (!device) {
         nyx_error("Failed to open light device (id %i)", id);
         return false;
@@ -123,7 +124,7 @@ static bool hybris_light_set_pattern(struct light_device_t *device, int r, int g
 
     if (ms_on > 0 && ms_off > 0)
     {
-        state.flashMode = LIGHT_FLASH_HARDWARE;
+        state.flashMode = LIGHT_FLASH_TIMED;
         state.flashOnMS = ms_on;
         state.flashOffMS = ms_off;
     }
@@ -167,12 +168,23 @@ nyx_error_t nyx_module_open (nyx_instance_t i, nyx_device_t** d)
         return NYX_ERROR_DEVICE_UNAVAILABLE;
     }
 
+    /* open and obtain handle to notification LED */
+    notifications_device = hybris_light_init(LIGHT_ID_NOTIFICATIONS);
+    if(notifications_device == NULL)
+    {
+        nyx_error("Failed to create an LED-controller notification device");
+        return NYX_ERROR_DEVICE_UNAVAILABLE;
+    }
+
     return NYX_ERROR_NONE;
 }
 
 nyx_error_t nyx_module_close (nyx_device_t* d)
 {
     free(d);
+
+    hybris_light_release(notifications_device);
+    notifications_device = 0;
 
     hybris_light_release(backlight_device);
     backlight_device = 0;
@@ -210,11 +222,108 @@ done:
     return NYX_ERROR_NONE;
 }
 
+
+
+static nyx_error_t handle_notification_effect(nyx_device_handle_t handle, nyx_led_controller_effect_t effect)
+{
+    nyx_error_t err = NYX_ERROR_NONE; 
+    bool hybris_err = true ;
+    unsigned int led_on = 0 , led_off = 0 , brightness = 0 ;
+
+    /* Sanity Check input params */
+    if( handle == NULL ) 
+    {
+        nyx_error("Handle to LED device - for notification-effect = NULL");
+        err = NYX_ERROR_INVALID_HANDLE ; 
+        goto err_notification_handle ;
+    }
+
+    if( effect.core_configuration == NULL ) 
+    {
+        nyx_error("LED Core configuration argument = NULL");
+        err = NYX_ERROR_INVALID_VALUE ; 
+        goto err_notification_handle ;
+    }
+
+    switch(effect.required.effect)
+    {
+        case NYX_LED_CONTROLLER_EFFECT_LED_SET:
+            err = nyx_led_controller_core_configuration_get_param( effect.core_configuration 
+                                                                   , NYX_LED_CONTROLLER_CORE_EFFECT_BRIGHTNESS
+                                                                   , (int32_t *)&brightness);
+            if( err != NYX_ERROR_NONE )
+            {
+                nyx_debug("Could not resolve brightness level");
+                goto err_notification_handle ;
+            }
+  
+            nyx_debug("setting LED brightness = [%d].Duty-cycle=100%" , brightness);
+           
+            /* no nyx params for LED RGB - hence we use grey scale */
+            hybris_err = hybris_light_set_pattern(notifications_device 
+                                                  , brightness, brightness, brightness , 0, 0); 
+            if( hybris_err == false ) 
+            {
+                err = NYX_ERROR_INVALID_OPERATION ;
+                goto err_notification_handle ;
+            }
+            break;
+        case NYX_LED_CONTROLLER_EFFECT_LED_PULSATE:
+            err = nyx_led_controller_core_configuration_get_param( effect.core_configuration 
+                                                                   , NYX_LED_CONTROLLER_CORE_EFFECT_FADE_IN
+                                                                   , (int32_t *)&led_on);
+            if( err != NYX_ERROR_NONE )
+            {
+                nyx_debug("Could not resolve pulse fade-in time");
+                goto err_notification_handle ;
+            }
+
+            err = nyx_led_controller_core_configuration_get_param( effect.core_configuration 
+                                                                   , NYX_LED_CONTROLLER_CORE_EFFECT_FADE_OUT
+                                                                   , (int32_t *)&led_off);
+            if( err != NYX_ERROR_NONE )
+            {
+                nyx_debug("Could not resolve pulse fade-out time");
+                goto err_notification_handle ;
+            }
+
+            err = nyx_led_controller_core_configuration_get_param( effect.core_configuration 
+                                                                   , NYX_LED_CONTROLLER_CORE_EFFECT_BRIGHTNESS
+                                                                   , (int32_t *)&brightness);
+            if( err != NYX_ERROR_NONE )
+            {
+                nyx_debug("Could not resolve pulse brightness level");
+                goto err_notification_handle ;
+            }
+  
+            nyx_debug("setting LED brightness[%d] to pulse on[ms]=%d , off[ms]=%d"
+                                                               , brightness , led_on , led_off);
+           
+            /* no nyx params for LED RGB - hence we use grey scale */
+            hybris_err = hybris_light_set_pattern(notifications_device 
+                                                  , brightness, brightness, brightness
+                                                  , led_on, led_off); 
+            if( hybris_err == false ) 
+            {
+                err = NYX_ERROR_INVALID_OPERATION ;
+                goto err_notification_handle ;
+            }
+            break;
+        default:
+            break;
+    }
+
+err_notification_handle:
+    return err;
+}
+
 nyx_error_t led_controller_execute_effect(nyx_device_handle_t handle, nyx_led_controller_effect_t effect)
 {
     switch (effect.required.led) {
     case NYX_LED_CONTROLLER_BACKLIGHT_LEDS:
         return handle_backlight_effect(handle, effect);
+    case NYX_LED_CONTROLLER_CENTER_LED:
+        return handle_notification_effect(handle, effect);
     default:
         break;
     }
