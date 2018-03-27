@@ -28,6 +28,7 @@
 #include <nyx/nyx_module.h>
 #include <nyx/module/nyx_utils.h>
 #include <hybris/properties/properties.h>
+#include "msgid.h"
 
 struct device_info {
 	nyx_device_t base;

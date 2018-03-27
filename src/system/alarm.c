@@ -35,9 +35,12 @@
 #include <stdbool.h>
 #include <glib.h>
 #include <nyx/nyx_module.h>
-
+#include <nyx/common/nyx_macros.h>
+#include <nyx/module/nyx_utils.h>
+#include "msgid.h"
 #include "alarm.h"
 #include "android_alarm.h"
+
 
 /**
  * @addtogroup RTCAlarms
@@ -93,7 +96,7 @@ bool android_alarm_read(struct tm *tm_time)
 
 	int32_t ret = ioctl(alarm_fd, ANDROID_ALARM_GET_TIME(ANDROID_ALARM_RTC), &alarm_time);
 	if (ret < 0) {
-		nyx_warn("ANDROID_ALARM_GET_TIME(ANDROID_ALARM_SYSTEMTIME) ioctl %d", errno);
+		nyx_warn(MSGID_NYX_HYBRIS_ANDROID_ALARM_GET_TIME_ERR, 0, "ANDROID_ALARM_GET_TIME(ANDROID_ALARM_SYSTEMTIME) ioctl %d", errno);
 		return false;
 	}
 
@@ -119,7 +122,7 @@ time_t android_alarm_time(time_t *time)
 
 	t = timegm(&tm);
 
-	printf("%s after android_alarm_read: %d\n", __FUNCTION__, t);
+	printf("%s after android_alarm_read \n", __FUNCTION__);
 
 	if (time)
 		*time = t;
@@ -160,7 +163,7 @@ bool android_alarm_set(time_t expiry)
 
 	rc = ioctl(alarm_fd, ANDROID_ALARM_SET(ANDROID_ALARM_RTC_WAKEUP), &wakeup_time);
 	if (rc != 0) {
-		g_warning("Failed to set wakeup alarm at %d (err %d)", expiry, rc);
+		g_warning("Failed to set wakeup alarm at %d", expiry);
 		return false;
 	}
 

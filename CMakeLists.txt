@@ -1,6 +1,4 @@
-# @@@LICENSE
-#
-#      Copyright (c) 2010-2013 LG Electronics, Inc.
+# Copyright (c) 2010-2018 LG Electronics, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,14 +12,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# LICENSE@@@
+# SPDX-License-Identifier: Apache-2.0
 
 cmake_minimum_required(VERSION 2.8.7)
 
 project(nyx-modules-hybris)
 
-include(webOS/webOS)
-webos_modules_init(1 0 0 QUALIFIER RC4)
-webos_component(0 1 0)
+include(FindPkgConfig)
 
+include(webOS/webOS)
+
+webos_modules_init(1 6 2)
+webos_component(1 0 0)
+webos_include_install_paths()
+
+pkg_check_modules(PMLOG REQUIRED PmLogLib)
+include_directories(${PMLOG_INCLUDE_DIRS})
+webos_add_compiler_flags(ALL ${PMLOG_CFLAGS_OTHER})
+
+webos_nyx_module_provider(HYBRIS DEVICEINFO HAPTICS LEDCONTROLLER SYSTEM)
+webos_test_provider(GLIB_TEST)
+webos_include_install_paths()
+
+include_directories(include/internal)
 add_subdirectory(src)
