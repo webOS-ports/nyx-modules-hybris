@@ -1,20 +1,18 @@
-/* @@@LICENSE
-*
-* Copyright (c) 2014 Simon Busch <morphis@gravedo.de>
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-* http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*
-* LICENSE@@@ */
+// Copyright (c) 2014 Simon Busch <morphis@gravedo.de>
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 /*
 *************************************************************************
@@ -35,12 +33,10 @@
 #include <stdbool.h>
 #include <glib.h>
 #include <nyx/nyx_module.h>
-#include <nyx/common/nyx_macros.h>
-#include <nyx/module/nyx_utils.h>
+#include <nyx/module/nyx_log.h>
 #include "msgid.h"
 #include "alarm.h"
 #include "android_alarm.h"
-
 
 /**
  * @addtogroup RTCAlarms
@@ -122,7 +118,7 @@ time_t android_alarm_time(time_t *time)
 
 	t = timegm(&tm);
 
-	printf("%s after android_alarm_read \n", __FUNCTION__);
+	printf("%s after android_alarm_read %ld\n", __FUNCTION__);
 
 	if (time)
 		*time = t;
@@ -163,7 +159,7 @@ bool android_alarm_set(time_t expiry)
 
 	rc = ioctl(alarm_fd, ANDROID_ALARM_SET(ANDROID_ALARM_RTC_WAKEUP), &wakeup_time);
 	if (rc != 0) {
-		g_warning("Failed to set wakeup alarm at %d", expiry);
+		g_warning("Failed to set wakeup alarm at %ld (err %d)", expiry, rc);
 		return false;
 	}
 

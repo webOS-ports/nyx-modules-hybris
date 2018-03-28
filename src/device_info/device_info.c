@@ -27,6 +27,7 @@
 #include <openssl/sha.h>
 #include <nyx/nyx_module.h>
 #include <nyx/module/nyx_utils.h>
+#include <nyx/module/nyx_log.h>
 #include <hybris/properties/properties.h>
 #include "msgid.h"
 

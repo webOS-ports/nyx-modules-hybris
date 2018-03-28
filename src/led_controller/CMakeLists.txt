@@ -18,4 +18,6 @@
 
 include_directories(.)
 
-nyx_create_module(MicroControllerLEDsDefault led_controller.c)
+webos_build_nyx_module(MicroControllerLEDsDefault 
+                       SOURCES led_controller.c
+                       LIBRARIES  ${GLIB2_LDFLAGS} ${PMLOG_LDFLAGS} ${NYXLIB_LDFLAGS} -lhardware)

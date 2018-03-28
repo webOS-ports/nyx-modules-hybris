@@ -23,6 +23,7 @@
 #include <nyx/nyx_module.h>
 #include <nyx/common/nyx_macros.h>
 #include <nyx/module/nyx_utils.h>
+#include <nyx/module/nyx_log.h>
 #include "msgid.h"
 
 #define VIBRATOR_PAUSE 25 //ms
