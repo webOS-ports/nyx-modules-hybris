@@ -187,7 +187,7 @@ nyx_error_t device_info_query(nyx_device_handle_t device,
 				break;
 			}
 			SHA1((unsigned char*) value, strlen(value), hash);
-			dinfo->nduid = (char*) malloc(sizeof(char) * (SHA_DIGEST_LENGTH * 2));
+			dinfo->nduid = (char*) malloc(sizeof(char) * (SHA_DIGEST_LENGTH * 2 + 1));
 			p = dinfo->nduid;
 			for (n = 0; n < SHA_DIGEST_LENGTH; n++) {
 				snprintf(p, 3, "%02x", hash[n]);
