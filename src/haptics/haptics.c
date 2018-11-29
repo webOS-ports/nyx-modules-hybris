@@ -17,10 +17,14 @@
 *
 * LICENSE@@@ */
 
-#include <nyx/nyx_module.h>
 #include <android/hardware_legacy/vibrator.h>
 #include <glib.h>
 #include <stdlib.h>
+#include <nyx/nyx_module.h>
+#include <nyx/common/nyx_macros.h>
+#include <nyx/module/nyx_utils.h>
+#include <nyx/module/nyx_log.h>
+#include "msgid.h"
 
 #define VIBRATOR_PAUSE 25 //ms
 
@@ -38,7 +42,7 @@ nyx_error_t nyx_module_open (nyx_instance_t instance, nyx_device_t** device_ptr)
 		return NYX_ERROR_DEVICE_NOT_EXIST;
 
 	if (nyxDev) {
-		nyx_info("Haptics module already open");
+		nyx_info(MSGID_NYX_HYBRIS_HAP_ALREADY_OPEN_ERR, 0, "Haptics module already open");
 		*device_ptr = (nyx_device_t *)nyxDev;
 		return NYX_ERROR_NONE;
 	}

@@ -1,6 +1,4 @@
-# @@@LICENSE
-#
-#      Copyright (c) 2010-2013 LG Electronics, Inc.
+# Copyright (c) 2010-2018 LG Electronics, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,15 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# LICENSE@@@
+# SPDX-License-Identifier: Apache-2.0
 
 include_directories(.)
 
-nyx_create_module(SystemMain
-	system.c
-	rtc.c
-	alarm.c)
-
-target_link_libraries(SystemMain
-	${GLIB2_LDFLAGS} ${GIO_LDFLAGS} ${NYXLIB_LDFLAGS}
-	-lsuspend -lm -lrt -lpthread)
+webos_build_nyx_module(SystemMain 
+                       SOURCES system.c rtc.c alarm.c
+                       LIBRARIES ${GLIB2_LDFLAGS} ${GIO_LDFLAGS} ${PMLOG_LDFLAGS} ${NYXLIB_LDFLAGS} -lsuspend -lm -lrt -lpthread)

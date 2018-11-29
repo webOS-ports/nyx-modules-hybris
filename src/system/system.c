@@ -34,11 +34,11 @@
 #include <sys/un.h>
 #include <glib.h>
 #include <libsuspend.h>
-
 #include "rtc.h"
-
 #include <nyx/nyx_module.h>
+#include <nyx/common/nyx_macros.h>
 #include <nyx/module/nyx_utils.h>
+#include "msgid.h"
 
 nyx_device_t *nyxDev;
 nyx_device_callback_function_t alarm_fired_callback = NULL;
@@ -58,7 +58,7 @@ nyx_error_t nyx_module_open(nyx_instance_t i, nyx_device_t **d)
 {
 	if (nyxDev)
 	{
-		nyx_info("System module already open.");
+		nyx_info(MSGID_NYX_HYBRIS_SYSTEM_MODULE_OPEN_ERR, 0, "System module already open.");
 		return NYX_ERROR_NONE;
 	}
 
@@ -81,13 +81,14 @@ nyx_error_t nyx_module_open(nyx_instance_t i, nyx_device_t **d)
 	                           NYX_SYSTEM_QUERY_RTC_TIME_MODULE_METHOD,
 	                           "system_query_rtc_time");
 
+	/*FIXME
 	nyx_module_register_method(i, (nyx_device_t *)nyxDev,
 	                           NYX_SYSTEM_SUSPEND_ASYNC_MODULE_METHOD,
 	                           "system_suspend_async");
 
 	nyx_module_register_method(i, (nyx_device_t *)nyxDev,
 	                           NYX_SYSTEM_RESUME_MODULE_METHOD,
-	                           "system_resume");
+	                           "system_resume");*/
 
 	nyx_module_register_method(i, (nyx_device_t *)nyxDev,
 	                           NYX_SYSTEM_SHUTDOWN_MODULE_METHOD,

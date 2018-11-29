@@ -1,32 +1,31 @@
-/* @@@LICENSE
-*
-* Copyright (c) 2013 Simon Busch <morphis@gravedo.de>
-*
-* Licensed under the Apache License, Version 2.0 (the "License");
-* you may not use this file except in compliance with the License.
-* You may obtain a copy of the License at
-*
-* http://www.apache.org/licenses/LICENSE-2.0
-*
-* Unless required by applicable law or agreed to in writing, software
-* distributed under the License is distributed on an "AS IS" BASIS,
-* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-* See the License for the specific language governing permissions and
-* limitations under the License.
-*
-* LICENSE@@@ */
+// Copyright (c) 2013 Simon Busch <morphis@gravedo.de>
+// Copyright (c) 2018 Herman van Hazendonk <github.com@herrie.org>
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
 
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
 #include <stdio.h>
 #include <glib.h>
-
 #include <android/system/window.h>
 #include <android/hardware/lights.h>
-
 #include <nyx/nyx_module.h>
 #include <nyx/module/nyx_utils.h>
+#include <nyx/module/nyx_log.h>
+#include "msgid.h"
 
 NYX_DECLARE_MODULE(NYX_DEVICE_LED_CONTROLLER, "LedControllers");
 
@@ -54,7 +53,7 @@ static bool hybris_module_lights_load(void)
         done = true;
         hw_get_module(LIGHTS_HARDWARE_MODULE_ID, &lights_module);
         if (!lights_module)
-            nyx_error("Could not load android hardware lights module");
+            nyx_error(MSGID_NYX_HYBRIS_LED_ANDROID_LIGHT_MOD_ERR , 0, "Could not load android hardware lights module");
     }
 
     return lights_module != 0;
@@ -69,7 +68,7 @@ static struct light_device_t* hybris_light_init(const char *id)
 
     light_device_open(lights_module, id, &device);
     if (!device) {
-        nyx_error("Failed to open light device (id %i)", id);
+        nyx_error(MSGID_NYX_HYBRIS_LED_ANDROID_LIGHT_DEV_ERR, 0, "Failed to open light device (id %s)", id);
         return false;
     }
 
@@ -104,7 +103,7 @@ static bool hybris_light_set_brightness(struct light_device_t *device, int level
 
     if (device->set_light(device, &state) < 0)
     {
-        nyx_error("Failed to set brightness for light (level %i)", level);
+        nyx_error(MSGID_NYX_HYBRIS_LED_BRIGHTNESS_LEV_ERR, 0, "Failed to set brightness for light (level %i)", level);
         return false;
     }
 
@@ -157,14 +156,14 @@ nyx_error_t nyx_module_open (nyx_instance_t i, nyx_device_t** d)
 
     if (!hybris_module_lights_load())
     {
-        nyx_error("Failed to open lights hardware abstraction module");
+        nyx_error(MSGID_NYX_HYBRIS_LED_HAL_MOD_OPEN_ERR, 0, "Failed to open lights hardware abstraction module");
         return NYX_ERROR_DEVICE_UNAVAILABLE;
     }
 
     backlight_device = hybris_light_init(LIGHT_ID_BACKLIGHT);
     if (!backlight_device)
     {
-        nyx_error("Failed to create a backlight device");
+        nyx_error(MSGID_NYX_HYBRIS_LED_BACKLIGHT_DEV_ERR, 0, "Failed to create a backlight device");
         return NYX_ERROR_DEVICE_UNAVAILABLE;
     }
 
@@ -172,7 +171,7 @@ nyx_error_t nyx_module_open (nyx_instance_t i, nyx_device_t** d)
     notifications_device = hybris_light_init(LIGHT_ID_NOTIFICATIONS);
     if(notifications_device == NULL)
     {
-        nyx_error("Failed to create an LED-controller notification device");
+        nyx_error(MSGID_NYX_HYBRIS_LED_CONTROLLER_DEV_ERR, 0, "Failed to create an LED-controller notification device");
         return NYX_ERROR_DEVICE_UNAVAILABLE;
     }
 
@@ -233,14 +232,14 @@ static nyx_error_t handle_notification_effect(nyx_device_handle_t handle, nyx_le
     /* Sanity Check input params */
     if( handle == NULL ) 
     {
-        nyx_error("Handle to LED device - for notification-effect = NULL");
+        nyx_error(MSGID_NYX_HYBRIS_LED_INVALID_HANDLE_ERR, 0, "Handle to LED device - for notification-effect = NULL");
         err = NYX_ERROR_INVALID_HANDLE ; 
         goto err_notification_handle ;
     }
 
     if( effect.core_configuration == NULL ) 
     {
-        nyx_error("LED Core configuration argument = NULL");
+        nyx_error(MSGID_NYX_HYBRIS_LED_INVALID_VALUE_ERR, 0, "LED Core configuration argument = NULL");
         err = NYX_ERROR_INVALID_VALUE ; 
         goto err_notification_handle ;
     }
@@ -257,7 +256,7 @@ static nyx_error_t handle_notification_effect(nyx_device_handle_t handle, nyx_le
                 goto err_notification_handle ;
             }
   
-            nyx_debug("setting LED brightness = [%d].Duty-cycle=100%" , brightness);
+            nyx_debug("setting LED brightness = [%d].Duty-cycle=100%%" , brightness);
            
             /* no nyx params for LED RGB - hence we use grey scale */
             hybris_err = hybris_light_set_pattern(notifications_device 

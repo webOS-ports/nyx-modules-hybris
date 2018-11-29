@@ -19,5 +19,6 @@
 
 include_directories(.)
 
-nyx_create_module(HapticsMain haptics.c)
-target_link_libraries(HapticsMain -lvibrator)
+webos_build_nyx_module(HapticsMain 
+                       SOURCES haptics.c
+                       LIBRARIES  ${GLIB2_LDFLAGS} ${GIO_LDFLAGS} ${PMLOG_LDFLAGS} ${NYXLIB_LDFLAGS} -lvibrator)
