@@ -17,7 +17,12 @@
 *
 * LICENSE@@@ */
 
+#if ANDROID_VERSION_MAJOR <= 5
 #include <android/hardware_legacy/vibrator.h>
+#else
+#include <android/hardware/vibrator.h>
+#endif
+
 #include <glib.h>
 #include <stdlib.h>
 #include <nyx/nyx_module.h>
