@@ -17,6 +17,8 @@
 *
 * LICENSE@@@ */
 
+#include <android-version.h>
+
 #if ANDROID_VERSION_MAJOR <= 5
 #include <android/hardware_legacy/vibrator.h>
 #else
