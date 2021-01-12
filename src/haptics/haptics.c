@@ -45,6 +45,10 @@ NYX_DECLARE_MODULE(NYX_DEVICE_HAPTICS, "Haptics")
 
 nyx_error_t nyx_module_open (nyx_instance_t instance, nyx_device_t** device_ptr)
 {
+#if (ANDROID_VERSION_MAJOR >= 9)
+	return NYX_ERROR_DEVICE_NOT_EXIST;
+#endif
+
 	if (!vibrator_exists())
 		return NYX_ERROR_DEVICE_NOT_EXIST;
 
