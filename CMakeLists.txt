@@ -22,6 +22,10 @@ include(FindPkgConfig)
 
 include(webOS/webOS)
 
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/machine.cmake)
+	include(${CMAKE_CURRENT_SOURCE_DIR}/machine.cmake)
+endif()
+
 webos_modules_init(1 6 2)
 webos_component(1 0 0)
 webos_include_install_paths()

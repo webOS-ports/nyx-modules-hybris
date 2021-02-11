@@ -85,7 +85,20 @@ macro(nyx_create_module module)
 	install(TARGETS ${module} DESTINATION ${NYX_MODULE_DIR})
 endmacro()
 
-add_subdirectory(led_controller)
-add_subdirectory(device_info)
-add_subdirectory(system)
-add_subdirectory(haptics)
+# only include the module if it wasn't built with native Nyx module
+
+if(NOT NYXMOD_OW_LED)
+	add_subdirectory(led_controller)
+endif()
+
+if(NOT NYXMOD_OW_DEVICEINFO)
+	add_subdirectory(device_info)
+endif()
+
+if(NOT NYXMOD_OW_SYSTEM)
+	add_subdirectory(system)
+endif()
+
+if(NOT NYXMOD_OW_HAPTICS)
+	add_subdirectory(haptics)
+endif()
