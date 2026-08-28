@@ -29,9 +29,73 @@
 
 NYX_DECLARE_MODULE(NYX_DEVICE_LED_CONTROLLER, "LedControllers");
 
+/*
+ * On newer Halium bases the display backlight is no longer reachable through the
+ * legacy Android lights hw_module (it is a HIDL/AIDL service, or an MTK vendor
+ * HAL that hw_get_module() cannot dlopen inside the hybris namespace). When the
+ * lights module fails to load we fall back to the kernel LED-class backlight,
+ * which MTK (and many others) expose here. The incoming brightness_lcd is a
+ * 0..100 percentage (see luna-sysmgr NyxLedControl), scaled to the node's
+ * max_brightness. The path can be overridden per-machine from cmake.
+ */
+#ifndef BACKLIGHT_SYSFS_PATH
+#define BACKLIGHT_SYSFS_PATH "/sys/class/leds/lcd-backlight/brightness"
+#endif
+#ifndef BACKLIGHT_MAX_SYSFS_PATH
+#define BACKLIGHT_MAX_SYSFS_PATH "/sys/class/leds/lcd-backlight/max_brightness"
+#endif
+
 static const struct hw_module_t *lights_module = 0;
 static struct light_device_t *backlight_device = 0;
 static struct light_device_t *notifications_device = 0;
+
+static bool use_sysfs_backlight = false;
+static int sysfs_backlight_max = 255;
+
+static int sysfs_read_int(const char *path, int fallback)
+{
+    FILE *f = fopen(path, "r");
+    int value = fallback;
+
+    if (!f)
+        return fallback;
+
+    if (fscanf(f, "%d", &value) != 1)
+        value = fallback;
+
+    fclose(f);
+    return value;
+}
+
+static bool sysfs_backlight_available(void)
+{
+    FILE *f = fopen(BACKLIGHT_SYSFS_PATH, "w");
+
+    if (!f)
+        return false;
+
+    fclose(f);
+    return true;
+}
+
+/* level is a 0..100 percentage; scale it onto the node's max_brightness. */
+static bool sysfs_backlight_set(int level)
+{
+    int pct = (level < 0) ? 0 : (level > 100) ? 100 : level;
+    int value = (pct * sysfs_backlight_max + 50) / 100;
+    FILE *f = fopen(BACKLIGHT_SYSFS_PATH, "w");
+
+    if (!f)
+    {
+        nyx_error(MSGID_NYX_HYBRIS_LED_BRIGHTNESS_LEV_ERR, 0,
+                  "Failed to open %s for backlight (level %i)", BACKLIGHT_SYSFS_PATH, level);
+        return false;
+    }
+
+    fprintf(f, "%d", value);
+    fclose(f);
+    return true;
+}
 
 static int light_device_open(const struct hw_module_t* module, const char *id,
                              struct light_device_t** device)
@@ -156,6 +220,22 @@ nyx_error_t nyx_module_open (nyx_instance_t i, nyx_device_t** d)
 
     if (!hybris_module_lights_load())
     {
+        /*
+         * No usable Android lights HAL. If the kernel exposes an LED-class
+         * backlight, drive it directly from sysfs so the brightness slider still
+         * works; the notification LED is simply unavailable in that case.
+         */
+        if (sysfs_backlight_available())
+        {
+            use_sysfs_backlight = true;
+            sysfs_backlight_max = sysfs_read_int(BACKLIGHT_MAX_SYSFS_PATH, 255);
+            if (sysfs_backlight_max <= 0)
+                sysfs_backlight_max = 255;
+            nyx_debug("Lights HAL unavailable; using sysfs backlight %s (max %d)",
+                      BACKLIGHT_SYSFS_PATH, sysfs_backlight_max);
+            return NYX_ERROR_NONE;
+        }
+
         nyx_error(MSGID_NYX_HYBRIS_LED_HAL_MOD_OPEN_ERR, 0, "Failed to open lights hardware abstraction module");
         return NYX_ERROR_DEVICE_UNAVAILABLE;
     }
@@ -204,7 +284,15 @@ static nyx_error_t handle_backlight_effect(nyx_device_handle_t handle, nyx_led_c
         nyx_debug("Adjusting backlight: brightness %i",
                   brightness);
 
-        if (!hybris_light_set_brightness(backlight_device, brightness))
+        if (use_sysfs_backlight)
+        {
+            if (!sysfs_backlight_set(brightness))
+            {
+                status = NYX_CALLBACK_STATUS_FAILED;
+                goto done;
+            }
+        }
+        else if (!hybris_light_set_brightness(backlight_device, brightness))
         {
             status = NYX_CALLBACK_STATUS_FAILED;
             goto done;
