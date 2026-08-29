@@ -81,14 +81,13 @@ nyx_error_t nyx_module_open(nyx_instance_t i, nyx_device_t **d)
 	                           NYX_SYSTEM_QUERY_RTC_TIME_MODULE_METHOD,
 	                           "system_query_rtc_time");
 
-	/*FIXME
 	nyx_module_register_method(i, (nyx_device_t *)nyxDev,
 	                           NYX_SYSTEM_SUSPEND_ASYNC_MODULE_METHOD,
 	                           "system_suspend_async");
 
 	nyx_module_register_method(i, (nyx_device_t *)nyxDev,
 	                           NYX_SYSTEM_RESUME_MODULE_METHOD,
-	                           "system_resume");*/
+	                           "system_resume");
 
 	nyx_module_register_method(i, (nyx_device_t *)nyxDev,
 	                           NYX_SYSTEM_SHUTDOWN_MODULE_METHOD,
