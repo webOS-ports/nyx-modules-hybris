@@ -20,8 +20,23 @@
 #include <errno.h>
 #include <stdio.h>
 #include <glib.h>
-#include <android/system/window.h>
-#include <android/hardware/lights.h>
+/*
+ * <android/system/window.h> used to be included here and contributed nothing -
+ * this module names no symbol from it, and lights.h pulls in
+ * hardware/hardware.h for hw_get_module() on its own. It was not harmless:
+ * on Android 14 it reaches AHardwareBuffer declarations written with the Clang
+ * _Nullable attribute, which GCC rejects outright.
+ */
+#if defined(__has_include)
+#  if __has_include(<android/hardware/lights.h>)
+#    include <android/hardware/lights.h>
+#  else
+     /* Android 14 stopped shipping it; see the header for why this is safe. */
+#    include "lights_compat.h"
+#  endif
+#else
+#  include <android/hardware/lights.h>
+#endif
 #include <nyx/nyx_module.h>
 #include <nyx/module/nyx_utils.h>
 #include <nyx/module/nyx_log.h>
@@ -105,7 +120,18 @@ static int light_device_open(const struct hw_module_t* module, const char *id,
 
 static void light_device_close(const struct light_device_t *device)
 {
-    device->common.close((struct hw_device_t*) device);
+    /*
+     * common.close is supplied by the vendor blob, and plenty of lights HALs
+     * leave it NULL - the legacy HAL never required it. Calling it
+     * unconditionally segfaults, and does so on the way out, long after the
+     * light has been set: on tissot every nyx_device_close() on the LED
+     * controller died here, which read as an unrelated crash rather than as
+     * "this HAL has no close".
+     */
+    if (device->common.close)
+    {
+        device->common.close((struct hw_device_t *) device);
+    }
 }
 
 static bool hybris_module_lights_load(void)
@@ -311,11 +337,90 @@ done:
 
 
 
+/*
+ * Resolve an effect's colour into the three channels the lights HAL wants.
+ *
+ * A caller that set no colour gets the greyscale this module has always
+ * produced, so CoreNaviLeds and every other brightness-only caller is
+ * unaffected. A caller that set one gets it scaled by brightness, which is the
+ * contract documented in nyx_led_controller_core_configuration.h: colour is the
+ * hue, brightness stays the intensity control.
+ */
+static void resolve_colour(nyx_led_controller_core_configuration_handle_t config,
+                           int brightness, int *r, int *g, int *b)
+{
+    static const nyx_led_controller_parameter_type_t param[3] = {
+        NYX_LED_CONTROLLER_CORE_EFFECT_COLOUR_RED,
+        NYX_LED_CONTROLLER_CORE_EFFECT_COLOUR_GREEN,
+        NYX_LED_CONTROLLER_CORE_EFFECT_COLOUR_BLUE,
+    };
+    /*
+     * Seeded before the call, not after a failed one. nyx-lib's get_param ends
+     * its switch with "default: break;" and returns NYX_ERROR_NONE for a
+     * parameter it does not recognise, without touching *value - so against a
+     * nyx-lib older than the one that added these, the channels would keep
+     * whatever was on the stack, any_set would go true on garbage, and garbage
+     * would be scaled and handed to set_light as a colour.
+     */
+    int32_t channel[3] = {
+        NYX_LED_CONTROLLER_CORE_COLOUR_UNSET,
+        NYX_LED_CONTROLLER_CORE_COLOUR_UNSET,
+        NYX_LED_CONTROLLER_CORE_COLOUR_UNSET,
+    };
+    bool any_set = false;
+    int i;
+
+    for (i = 0; i < 3; i++)
+    {
+        if (nyx_led_controller_core_configuration_get_param(config, param[i],
+                                                           &channel[i]) != NYX_ERROR_NONE)
+            channel[i] = NYX_LED_CONTROLLER_CORE_COLOUR_UNSET;
+
+        if (channel[i] != NYX_LED_CONTROLLER_CORE_COLOUR_UNSET)
+            any_set = true;
+    }
+
+    if (!any_set)
+    {
+        /* No colour asked for: what this module did before colour existed. */
+        channel[0] = channel[1] = channel[2] = brightness;
+    }
+    else
+    {
+        for (i = 0; i < 3; i++)
+        {
+            /* One channel named and the others silent means the others are off. */
+            if (channel[i] == NYX_LED_CONTROLLER_CORE_COLOUR_UNSET)
+                channel[i] = 0;
+
+            channel[i] = channel[i] * brightness / NYX_LED_CONTROLLER_CORE_COLOUR_MAX;
+        }
+    }
+
+    /*
+     * Clamp rather than trust the arithmetic: set_light packs each of these
+     * into one byte next to the alpha byte, so an out-of-range channel would
+     * not just be too bright, it would corrupt the value.
+     */
+    for (i = 0; i < 3; i++)
+    {
+        if (channel[i] < 0)
+            channel[i] = 0;
+        else if (channel[i] > NYX_LED_CONTROLLER_CORE_COLOUR_MAX)
+            channel[i] = NYX_LED_CONTROLLER_CORE_COLOUR_MAX;
+    }
+
+    *r = channel[0];
+    *g = channel[1];
+    *b = channel[2];
+}
+
 static nyx_error_t handle_notification_effect(nyx_device_handle_t handle, nyx_led_controller_effect_t effect)
 {
     nyx_error_t err = NYX_ERROR_NONE; 
     bool hybris_err = true ;
     unsigned int led_on = 0 , led_off = 0 , brightness = 0 ;
+    int red = 0 , green = 0 , blue = 0 ;
 
     /* Sanity Check input params */
     if( handle == NULL ) 
@@ -344,11 +449,13 @@ static nyx_error_t handle_notification_effect(nyx_device_handle_t handle, nyx_le
                 goto err_notification_handle ;
             }
   
-            nyx_debug("setting LED brightness = [%d].Duty-cycle=100%%" , brightness);
-           
-            /* no nyx params for LED RGB - hence we use grey scale */
-            hybris_err = hybris_light_set_pattern(notifications_device 
-                                                  , brightness, brightness, brightness , 0, 0); 
+            resolve_colour(effect.core_configuration, brightness, &red, &green, &blue);
+
+            nyx_debug("setting LED colour = [%d,%d,%d] (brightness %d).Duty-cycle=100%%"
+                                                  , red, green, blue, brightness);
+
+            hybris_err = hybris_light_set_pattern(notifications_device
+                                                  , red, green, blue , 0, 0); 
             if( hybris_err == false ) 
             {
                 err = NYX_ERROR_INVALID_OPERATION ;
@@ -383,12 +490,14 @@ static nyx_error_t handle_notification_effect(nyx_device_handle_t handle, nyx_le
                 goto err_notification_handle ;
             }
   
-            nyx_debug("setting LED brightness[%d] to pulse on[ms]=%d , off[ms]=%d"
-                                                               , brightness , led_on , led_off);
-           
-            /* no nyx params for LED RGB - hence we use grey scale */
-            hybris_err = hybris_light_set_pattern(notifications_device 
-                                                  , brightness, brightness, brightness
+            resolve_colour(effect.core_configuration, brightness, &red, &green, &blue);
+
+            nyx_debug("setting LED colour [%d,%d,%d] (brightness %d) to pulse on[ms]=%d , off[ms]=%d"
+                                                               , red, green, blue, brightness
+                                                               , led_on , led_off);
+
+            hybris_err = hybris_light_set_pattern(notifications_device
+                                                  , red, green, blue
                                                   , led_on, led_off); 
             if( hybris_err == false ) 
             {
