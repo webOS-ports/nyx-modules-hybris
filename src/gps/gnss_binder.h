@@ -78,6 +78,16 @@ typedef struct {
 	void (*acquire_wakelock_cb)(void *user_data);
 	void (*release_wakelock_cb)(void *user_data);
 	void (*request_utc_time_cb)(void *user_data);
+
+	/*
+	 * Assistance callbacks. Only ever fired when the corresponding extension
+	 * interface was obtained, so a HAL without A-GPS simply never calls them.
+	 */
+	void (*agnss_status_cb)(uint16_t type, uint16_t status, uint32_t ipv4_addr,
+	                        void *user_data);
+	void (*ril_request_set_id_cb)(uint32_t flags, void *user_data);
+	void (*ril_request_ref_loc_cb)(void *user_data);
+	void (*xtra_download_request_cb)(void *user_data);
 } gnss_binder_callbacks;
 
 /*
@@ -102,6 +112,32 @@ bool gnss_binder_inject_time(int64_t time_ms, int64_t time_reference_ms,
 bool gnss_binder_inject_location(double latitude, double longitude,
                                  float accuracy_m);
 void gnss_binder_delete_aiding_data(uint32_t flags);
+
+/*
+ * A-GPS / assistance.
+ *
+ * Each family lives behind an extension interface that IGnss hands out
+ * separately, and a HAL is free not to implement any of them. The *_available()
+ * predicates say whether the extension was actually obtained, which is what
+ * decides whether the matching nyx methods get registered at all - so a device
+ * without SUPL reports NYX_ERROR_NOT_IMPLEMENTED rather than silently
+ * accepting configuration it will never act on.
+ */
+bool gnss_binder_agnss_available(void);
+bool gnss_binder_agnss_set_server(uint16_t type, const char *hostname, int port);
+bool gnss_binder_agnss_data_conn_open(const char *apn, int16_t bearer_type);
+bool gnss_binder_agnss_data_conn_closed(void);
+bool gnss_binder_agnss_data_conn_failed(void);
+
+bool gnss_binder_ril_available(void);
+bool gnss_binder_ril_set_ref_location(uint16_t type, uint16_t mcc, uint16_t mnc,
+                                      uint16_t lac, uint32_t cid);
+bool gnss_binder_ril_set_set_id(uint16_t type, const char *set_id);
+bool gnss_binder_ril_update_network_state(bool connected, int type, bool roaming);
+bool gnss_binder_ril_update_network_availability(bool available, const char *apn);
+
+bool gnss_binder_xtra_available(void);
+bool gnss_binder_xtra_inject_data(const char *data, int length);
 
 /* Human-readable name of the bound HAL, e.g.
  * "android.hardware.gnss@1.1::IGnss/default", or NULL when not bound. Used to

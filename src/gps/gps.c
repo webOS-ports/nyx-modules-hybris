@@ -74,6 +74,21 @@ G_STATIC_ASSERT(NYX_GPS_LOCATION_HAS_LAT_LONG == GPS_LOCATION_HAS_LAT_LONG);
 G_STATIC_ASSERT(NYX_GPS_LOCATION_HAS_ALTITUDE == GPS_LOCATION_HAS_ALTITUDE);
 G_STATIC_ASSERT(NYX_GPS_LOCATION_HAS_SPEED == GPS_LOCATION_HAS_SPEED);
 G_STATIC_ASSERT(NYX_GPS_LOCATION_HAS_BEARING == GPS_LOCATION_HAS_BEARING);
+G_STATIC_ASSERT(NYX_AGPS_TYPE_SUPL == AGPS_TYPE_SUPL);
+G_STATIC_ASSERT(NYX_AGPS_TYPE_C2K == AGPS_TYPE_C2K);
+G_STATIC_ASSERT(NYX_AGPS_SET_ID_TYPE_IMSI == AGPS_SETID_TYPE_IMSI);
+G_STATIC_ASSERT(NYX_AGPS_SET_ID_TYPE_MSISDN == AGPS_SETID_TYPE_MSISDM);
+G_STATIC_ASSERT(NYX_AGPS_REQUEST_DATA_CONN == GNSS_REQUEST_AGNSS_DATA_CONN);
+G_STATIC_ASSERT(NYX_AGPS_RELEASE_DATA_CONN == GNSS_RELEASE_AGNSS_DATA_CONN);
+G_STATIC_ASSERT(NYX_AGPS_DATA_CONNECTED == GNSS_AGNSS_DATA_CONNECTED);
+G_STATIC_ASSERT(NYX_AGPS_DATA_CONN_DONE == GNSS_AGNSS_DATA_CONN_DONE);
+G_STATIC_ASSERT(NYX_AGPS_DATA_CONN_FAILED == GNSS_AGNSS_DATA_CONN_FAILED);
+G_STATIC_ASSERT(NYX_AGPS_REF_LOCATION_TYPE_GSM_CELLID == AGPS_REF_LOCATION_TYPE_GSM_CELLID);
+G_STATIC_ASSERT(NYX_AGPS_REF_LOCATION_TYPE_UMTS_CELLID == AGPS_REF_LOCATION_TYPE_UMTS_CELLID);
+G_STATIC_ASSERT(NYX_AGPS_RIL_NETWORK_TYPE_MOBILE == AGPS_RIL_NETWORK_TYPE_MOBILE);
+G_STATIC_ASSERT(NYX_AGPS_RIL_NETWORK_TYPE_WIFI == AGPS_RIL_NETWORK_TYPE_WIFI);
+G_STATIC_ASSERT(NYX_AGPS_RIL_REQUEST_SETID_IMSI == AGPS_RIL_REQUEST_SETID_IMSI);
+G_STATIC_ASSERT(NYX_AGPS_RIL_REQUEST_SETID_MSISDN == AGPS_RIL_REQUEST_SETID_MSISDN);
 
 typedef struct methodStringPair {
 	module_method_t mType;
@@ -101,9 +116,34 @@ static const methodStringPair_t mapMethodString[] = {
 	{NYX_GPS_SET_POSITION_MODE_MODULE_METHOD,  "set_position_mode"}
 };
 
+/*
+ * Assistance methods. These cannot be registered conditionally on the extension
+ * actually existing: nyx_module_register_method needs the nyx_instance_t that
+ * only nyx_module_open has, and the HAL is not bound until init(). So they are
+ * always registered and each one answers NYX_ERROR_NOT_IMPLEMENTED when its
+ * extension was not obtained - the caller still gets a truthful answer, just at
+ * call time rather than at registration time.
+ */
+static const methodStringPair_t mapAssistMethodString[] = {
+	{NYX_GPS_SET_SERVER_MODULE_METHOD,                  "set_server"},
+	{NYX_GPS_DATA_CONN_OPEN_MODULE_METHOD,              "data_conn_open"},
+	{NYX_GPS_DATA_CONN_CLOSED_MODULE_METHOD,            "data_conn_closed"},
+	{NYX_GPS_DATA_CONN_FAILED_MODULE_METHOD,            "data_conn_failed"},
+	{NYX_GPS_SET_REF_LOCATION_MODULE_METHOD,            "set_ref_location"},
+	{NYX_GPS_SET_SET_ID_MODULE_METHOD,                  "set_set_id"},
+	{NYX_GPS_UPDATE_NETWORK_STATE_MODULE_METHOD,        "update_network_state"},
+	{NYX_GPS_UPDATE_NETWORK_AVAILABILITY_MODULE_METHOD, "update_network_availability"},
+	{NYX_GPS_INJECT_XTRA_DATA_MODULE_METHOD,            "inject_xtra_data"}
+};
+
 static nyx_device_t *nyx_dev = NULL;
 
 static nyx_gps_callbacks_t *nyx_gps_cbs = NULL;
+static nyx_gps_xtra_callbacks_t *nyx_gps_xtra_cbs = NULL;
+static nyx_agps_callbacks_t *nyx_agps_cbs = NULL;
+static nyx_agps_ril_callbacks_t *nyx_agps_ril_cbs = NULL;
+
+static nyx_agps_status_t g_agps_status;
 
 /* Reused across callbacks so a fix does not allocate on the binder thread. */
 static nyx_gps_location_t g_location;
@@ -253,6 +293,78 @@ static void gps_request_utc_time_cb(void *user_data)
 		nyx_gps_cbs->request_utc_time_cb(nyx_gps_cbs->user_data);
 }
 
+/*
+ * nyx's APN bearer type follows the legacy GPS HAL numbering
+ * (AGPS_APN_BEARER_IPV4 == 0), while HIDL's ApnIpType inserted INVALID at 0 and
+ * shifted the rest up by one. They are therefore NOT interchangeable: passing a
+ * nyx value straight through would send IPv4 to the HAL as INVALID. This is the
+ * one place in the module where the two enumerations genuinely disagree, which
+ * is why it is a conversion rather than a static assert.
+ */
+static int32_t gps_apn_ip_type_to_hidl(nyx_agps_bearer_type_t bearer)
+{
+	switch (bearer) {
+	case NYX_AGPS_APN_BEARER_IPV4:
+		return APN_IP_IPV4;
+	case NYX_AGPS_APN_BEARER_IPV6:
+		return APN_IP_IPV6;
+	case NYX_AGPS_APN_BEARER_IPV4V6:
+		return APN_IP_IPV4V6;
+	default:
+		return APN_IP_INVALID;
+	}
+}
+
+static void gps_agnss_status_cb(uint16_t type, uint16_t status,
+                                uint32_t ipv4_addr, void *user_data)
+{
+	(void) user_data;
+
+	if (!nyx_agps_cbs || !nyx_agps_cbs->status_cb)
+		return;
+
+	memset(&g_agps_status, 0, sizeof(g_agps_status));
+	g_agps_status.size = sizeof(g_agps_status);
+	/* nyx_agps_type_t is signed; the HIDL values are 1 and 2, so this is
+	 * value-preserving, but be explicit about the narrowing. */
+	g_agps_status.type = (nyx_agps_type_t) type;
+	g_agps_status.status = status;
+	g_agps_status.ipv4_addr = (int) ipv4_addr;
+
+	nyx_agps_cbs->status_cb(&g_agps_status, nyx_agps_cbs->user_data);
+}
+
+static void gps_ril_request_set_id_cb(uint32_t flags, void *user_data)
+{
+	(void) user_data;
+
+	if (nyx_agps_ril_cbs && nyx_agps_ril_cbs->ril_request_set_id_cb)
+		nyx_agps_ril_cbs->ril_request_set_id_cb(flags,
+		                                        nyx_agps_ril_cbs->user_data);
+}
+
+static void gps_ril_request_ref_loc_cb(void *user_data)
+{
+	(void) user_data;
+
+	/*
+	 * IAGnssRilCallback::requestRefLocCb carries no argument, while nyx's
+	 * callback takes a flags word. The only reference-location kind this
+	 * module can supply is a cell ID, so say so rather than passing zero.
+	 */
+	if (nyx_agps_ril_cbs && nyx_agps_ril_cbs->ril_request_ref_loc_cb)
+		nyx_agps_ril_cbs->ril_request_ref_loc_cb(NYX_AGPS_RIL_REQUEST_REFLOC_CELLID,
+		                                         nyx_agps_ril_cbs->user_data);
+}
+
+static void gps_xtra_download_request_cb(void *user_data)
+{
+	(void) user_data;
+
+	if (nyx_gps_xtra_cbs && nyx_gps_xtra_cbs->xtra_download_request_cb)
+		nyx_gps_xtra_cbs->xtra_download_request_cb(nyx_gps_xtra_cbs->user_data);
+}
+
 static const gnss_binder_callbacks gnss_cbs = {
 	.location_cb = gps_location_cb,
 	.status_cb = gps_status_cb,
@@ -261,7 +373,11 @@ static const gnss_binder_callbacks gnss_cbs = {
 	.set_capabilities_cb = gps_set_capabilities_cb,
 	.acquire_wakelock_cb = gps_acquire_wakelock_cb,
 	.release_wakelock_cb = gps_release_wakelock_cb,
-	.request_utc_time_cb = gps_request_utc_time_cb
+	.request_utc_time_cb = gps_request_utc_time_cb,
+	.agnss_status_cb = gps_agnss_status_cb,
+	.ril_request_set_id_cb = gps_ril_request_set_id_cb,
+	.ril_request_ref_loc_cb = gps_ril_request_ref_loc_cb,
+	.xtra_download_request_cb = gps_xtra_download_request_cb
 };
 
 nyx_error_t init(nyx_device_handle_t handle,
@@ -273,14 +389,12 @@ nyx_error_t init(nyx_device_handle_t handle,
                  nyx_gps_geofence_callbacks_t *geofence_cbs)
 {
 	/*
-	 * The extension-interface callbacks are accepted and ignored: this
-	 * module registers none of the methods that would ever invoke them, so
-	 * storing them would only suggest otherwise.
+	 * NI and geofencing are still not implemented - they need IGnssNi and
+	 * IGnssGeofencing, which this module does not fetch - so their callbacks
+	 * are deliberately dropped rather than stored, matching the fact that
+	 * none of their methods are registered.
 	 */
-	(void) xtra_cbs;
-	(void) agps_cbs;
 	(void) gps_ni_cbs;
-	(void) agps_ril_cbs;
 	(void) geofence_cbs;
 
 	if (nyx_dev == NULL)
@@ -290,9 +404,15 @@ nyx_error_t init(nyx_device_handle_t handle,
 		return NYX_ERROR_INVALID_HANDLE;
 
 	nyx_gps_cbs = gps_cbs;
+	nyx_gps_xtra_cbs = xtra_cbs;
+	nyx_agps_cbs = agps_cbs;
+	nyx_agps_ril_cbs = agps_ril_cbs;
 
 	if (!gnss_binder_init(&gnss_cbs, NULL)) {
 		nyx_gps_cbs = NULL;
+		nyx_gps_xtra_cbs = NULL;
+		nyx_agps_cbs = NULL;
+		nyx_agps_ril_cbs = NULL;
 		return NYX_ERROR_DEVICE_UNAVAILABLE;
 	}
 
@@ -343,6 +463,9 @@ nyx_error_t cleanup(nyx_device_handle_t handle)
 
 	gnss_binder_cleanup();
 	nyx_gps_cbs = NULL;
+	nyx_gps_xtra_cbs = NULL;
+	nyx_agps_cbs = NULL;
+	nyx_agps_ril_cbs = NULL;
 
 	return NYX_ERROR_NONE;
 }
@@ -393,6 +516,152 @@ nyx_error_t set_position_mode(nyx_device_handle_t handle,
 	       NYX_ERROR_NONE : NYX_ERROR_GENERIC;
 }
 
+nyx_error_t set_server(nyx_device_handle_t handle, nyx_agps_type_t type,
+                       const char *hostname, int port)
+{
+	if (handle != nyx_dev)
+		return NYX_ERROR_INVALID_HANDLE;
+
+	if (!gnss_binder_agnss_available())
+		return NYX_ERROR_NOT_IMPLEMENTED;
+
+	return gnss_binder_agnss_set_server((uint16_t) type, hostname, port) ?
+	       NYX_ERROR_NONE : NYX_ERROR_GENERIC;
+}
+
+nyx_error_t data_conn_open(nyx_device_handle_t handle, nyx_agps_type_t agpsType,
+                           const char *apn, nyx_agps_bearer_type_t bearerType)
+{
+	if (handle != nyx_dev)
+		return NYX_ERROR_INVALID_HANDLE;
+
+	if (!gnss_binder_agnss_available())
+		return NYX_ERROR_NOT_IMPLEMENTED;
+
+	/*
+	 * IAGnss@1.0::dataConnOpen takes only the APN and its IP type; the AGnss
+	 * type is not part of the call, so agpsType is accepted for API
+	 * compatibility and has nothing to map onto.
+	 */
+	(void) agpsType;
+
+	return gnss_binder_agnss_data_conn_open(apn,
+	                                       (int16_t) gps_apn_ip_type_to_hidl(bearerType)) ?
+	       NYX_ERROR_NONE : NYX_ERROR_GENERIC;
+}
+
+nyx_error_t data_conn_closed(nyx_device_handle_t handle, nyx_agps_type_t agpsType)
+{
+	if (handle != nyx_dev)
+		return NYX_ERROR_INVALID_HANDLE;
+
+	if (!gnss_binder_agnss_available())
+		return NYX_ERROR_NOT_IMPLEMENTED;
+
+	(void) agpsType;
+
+	return gnss_binder_agnss_data_conn_closed() ?
+	       NYX_ERROR_NONE : NYX_ERROR_GENERIC;
+}
+
+nyx_error_t data_conn_failed(nyx_device_handle_t handle, nyx_agps_type_t agpsType)
+{
+	if (handle != nyx_dev)
+		return NYX_ERROR_INVALID_HANDLE;
+
+	if (!gnss_binder_agnss_available())
+		return NYX_ERROR_NOT_IMPLEMENTED;
+
+	(void) agpsType;
+
+	return gnss_binder_agnss_data_conn_failed() ?
+	       NYX_ERROR_NONE : NYX_ERROR_GENERIC;
+}
+
+nyx_error_t set_ref_location(nyx_device_handle_t handle,
+                             const nyx_agps_ref_location_t *agps_reflocation,
+                             size_t sz_struct)
+{
+	if (handle != nyx_dev)
+		return NYX_ERROR_INVALID_HANDLE;
+
+	if (!agps_reflocation || sz_struct < sizeof(*agps_reflocation))
+		return NYX_ERROR_INVALID_VALUE;
+
+	if (!gnss_binder_ril_available())
+		return NYX_ERROR_NOT_IMPLEMENTED;
+
+	/*
+	 * Only the cell-ID form can be forwarded. nyx also allows a MAC-address
+	 * reference location, which IAGnssRil@1.0 has no representation for.
+	 */
+	if (agps_reflocation->type != NYX_AGPS_REF_LOCATION_TYPE_GSM_CELLID &&
+	    agps_reflocation->type != NYX_AGPS_REF_LOCATION_TYPE_UMTS_CELLID)
+		return NYX_ERROR_NOT_IMPLEMENTED;
+
+	return gnss_binder_ril_set_ref_location(agps_reflocation->type,
+	                                        agps_reflocation->u.cellID.mcc,
+	                                        agps_reflocation->u.cellID.mnc,
+	                                        agps_reflocation->u.cellID.lac,
+	                                        agps_reflocation->u.cellID.cid) ?
+	       NYX_ERROR_NONE : NYX_ERROR_GENERIC;
+}
+
+nyx_error_t set_set_id(nyx_device_handle_t handle, nyx_agps_set_id_type_t type,
+                       const char *set_id)
+{
+	if (handle != nyx_dev)
+		return NYX_ERROR_INVALID_HANDLE;
+
+	if (!gnss_binder_ril_available())
+		return NYX_ERROR_NOT_IMPLEMENTED;
+
+	return gnss_binder_ril_set_set_id((uint16_t) type, set_id) ?
+	       NYX_ERROR_NONE : NYX_ERROR_GENERIC;
+}
+
+nyx_error_t update_network_state(nyx_device_handle_t handle, int connected,
+                                 int type, int roaming, const char *extra_info)
+{
+	if (handle != nyx_dev)
+		return NYX_ERROR_INVALID_HANDLE;
+
+	if (!gnss_binder_ril_available())
+		return NYX_ERROR_NOT_IMPLEMENTED;
+
+	/* IAGnssRil@1.0::updateNetworkState has no field for extra_info. */
+	(void) extra_info;
+
+	return gnss_binder_ril_update_network_state(connected != 0, type,
+	                                            roaming != 0) ?
+	       NYX_ERROR_NONE : NYX_ERROR_GENERIC;
+}
+
+nyx_error_t update_network_availability(nyx_device_handle_t handle, int available,
+                                        const char *apn)
+{
+	if (handle != nyx_dev)
+		return NYX_ERROR_INVALID_HANDLE;
+
+	if (!gnss_binder_ril_available())
+		return NYX_ERROR_NOT_IMPLEMENTED;
+
+	return gnss_binder_ril_update_network_availability(available != 0, apn) ?
+	       NYX_ERROR_NONE : NYX_ERROR_GENERIC;
+}
+
+nyx_error_t inject_xtra_data(nyx_device_handle_t handle, char *data, int length)
+{
+	if (handle != nyx_dev)
+		return NYX_ERROR_INVALID_HANDLE;
+
+	if (!gnss_binder_xtra_available())
+		return NYX_ERROR_NOT_IMPLEMENTED;
+
+	return gnss_binder_xtra_inject_data(data, length) ?
+	       NYX_ERROR_NONE : NYX_ERROR_GENERIC;
+}
+
 nyx_error_t nyx_module_open(nyx_instance_t instance, nyx_device_t **device_ptr)
 {
 	nyx_error_t error;
@@ -431,6 +700,18 @@ nyx_error_t nyx_module_open(nyx_instance_t instance, nyx_device_t **device_ptr)
 		}
 	}
 
+	for (i = 0; i < G_N_ELEMENTS(mapAssistMethodString); i++) {
+		error = nyx_module_register_method(instance, nyx_dev,
+		                                   mapAssistMethodString[i].mType,
+		                                   mapAssistMethodString[i].mString);
+		if (error != NYX_ERROR_NONE) {
+			nyx_error(MSGID_NYX_HYBRIS_GPS_METHOD_REGISTER_ERR, 0,
+			          "Failed to register GPS nyx module method %s",
+			          mapAssistMethodString[i].mString);
+			goto ERROR_HANDLER;
+		}
+	}
+
 	/*
 	 * The HAL is bound in init() rather than here. nyx_module_open runs when
 	 * anything opens the device, which on a Halium boot can be before
@@ -457,6 +738,9 @@ nyx_error_t nyx_module_close(nyx_device_t *device)
 
 	gnss_binder_cleanup();
 	nyx_gps_cbs = NULL;
+	nyx_gps_xtra_cbs = NULL;
+	nyx_agps_cbs = NULL;
+	nyx_agps_ril_cbs = NULL;
 
 	free(nyx_dev);
 	nyx_dev = NULL;
