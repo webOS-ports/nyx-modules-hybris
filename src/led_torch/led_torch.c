@@ -67,6 +67,40 @@ nyx_error_t nyx_module_open(nyx_instance_t i, nyx_device_t **d)
 		return NYX_ERROR_DEVICE_UNAVAILABLE;
 	}
 
+	/*
+	 * A successful init is not enough to conclude there is a torch here. It only
+	 * reports that the libhybris glue came up - droid_media_init() returns true
+	 * as soon as __init_glue() succeeds - and says nothing about whether the
+	 * Android-side libdroidmedia.so is new enough to have a torch entry point.
+	 *
+	 * droid_media_camera_set_torch_mode() is deliberately resolved with
+	 * __try_resolve_sym rather than the HYBRIS_WRAPPER macros, which abort on a
+	 * missing symbol. On a GSI older than 16.0 the symbol does not exist, so it
+	 * quietly returns false instead. Unprobed, this module would therefore open
+	 * cleanly and then fail every call it was ever given - which torchd cannot
+	 * tell apart from a torch that is present but broken, when the truth is that
+	 * this device has no camera-service torch route at all.
+	 *
+	 * Probing with an explicit "off" settles it. A missing symbol answers false
+	 * without reaching the camera service, so the older-GSI case is decided
+	 * exactly; and off is the state we want to start from regardless, so on a
+	 * device where the route does work the probe costs nothing and lights
+	 * nothing.
+	 *
+	 * Reopening will not give a different answer: droidmedia caches the lookup
+	 * in a function-local static, so the first attempt in this process decides
+	 * for the lifetime of the process.
+	 */
+	if (!droid_media_camera_set_torch_mode(false))
+	{
+		nyx_error(MSGID_NYX_HYBRIS_TORCH_UNSUPPORTED_ERR, 0,
+		          "no torch via the camera service; libdroidmedia.so is most likely "
+		          "older than the revision that added droid_media_camera_set_torch_mode");
+		return NYX_ERROR_DEVICE_UNAVAILABLE;
+	}
+
+	torch_on = false;
+
 	dev = (nyx_device_t *)calloc(1, sizeof(nyx_device_t));
 
 	if (NULL == dev)
