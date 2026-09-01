@@ -158,7 +158,9 @@ static const methodStringPair_t mapAssistMethodString[] = {
 	{NYX_GPS_ADD_GEOFENCE_AREA_MODULE_METHOD,           "add_geofence_area"},
 	{NYX_GPS_REMOVE_GEOFENCE_AREA_MODULE_METHOD,        "remove_geofence_area"},
 	{NYX_GPS_PAUSE_GEOFENCE_MODULE_METHOD,              "pause_geofence"},
-	{NYX_GPS_RESUME_GEOFENCE_MODULE_METHOD,             "resume_geofence"}
+	{NYX_GPS_RESUME_GEOFENCE_MODULE_METHOD,             "resume_geofence"},
+	{NYX_GPS_GET_DEBUG_DATA_MODULE_METHOD,              "get_debug_data"},
+	{NYX_GPS_SET_NFW_CALLBACK_MODULE_METHOD,            "set_nfw_callback"}
 };
 
 static nyx_device_t *nyx_dev = NULL;
@@ -169,10 +171,12 @@ static nyx_agps_callbacks_t *nyx_agps_cbs = NULL;
 static nyx_agps_ril_callbacks_t *nyx_agps_ril_cbs = NULL;
 static nyx_gps_ni_callbacks_t *nyx_gps_ni_cbs = NULL;
 static nyx_gps_geofence_callbacks_t *nyx_gps_geofence_cbs = NULL;
+static nyx_gps_nfw_callbacks_t *nyx_gps_nfw_cbs = NULL;
 
 static nyx_agps_status_t g_agps_status;
 static nyx_gps_ni_notification_t g_ni_notification;
 static nyx_gps_location_t g_geofence_location;
+static nyx_gps_nfw_notification_t g_nfw_notification;
 
 /* Reused across callbacks so a fix does not allocate on the binder thread. */
 static nyx_gps_location_t g_location;
@@ -518,6 +522,38 @@ static void gps_geofence_resume_cb(int32_t geofence_id, int32_t status, void *us
 		                                         nyx_gps_geofence_cbs->user_data);
 }
 
+static void gps_nfw_notify_cb(const gnss_binder_nfw_notification *n, void *user_data)
+{
+	(void) user_data;
+
+	if (!nyx_gps_nfw_cbs || !nyx_gps_nfw_cbs->nfw_notify_cb)
+		return;
+
+	memset(&g_nfw_notification, 0, sizeof(g_nfw_notification));
+	g_nfw_notification.size = sizeof(g_nfw_notification);
+	g_nfw_notification.protocol_stack = n->protocol_stack;
+	g_nfw_notification.requestor = n->requestor;
+	g_nfw_notification.response_type = n->response_type;
+	g_nfw_notification.in_emergency_mode = n->in_emergency_mode;
+	g_nfw_notification.is_cached_location = n->is_cached_location;
+
+	/* Copied, not referenced: the parcel dies with this callback. */
+	if (n->proxy_app_package_name)
+		g_strlcpy(g_nfw_notification.proxy_app_package_name,
+		          n->proxy_app_package_name,
+		          sizeof(g_nfw_notification.proxy_app_package_name));
+	if (n->other_protocol_stack_name)
+		g_strlcpy(g_nfw_notification.other_protocol_stack_name,
+		          n->other_protocol_stack_name,
+		          sizeof(g_nfw_notification.other_protocol_stack_name));
+	if (n->requestor_id)
+		g_strlcpy(g_nfw_notification.requestor_id, n->requestor_id,
+		          sizeof(g_nfw_notification.requestor_id));
+
+	nyx_gps_nfw_cbs->nfw_notify_cb(&g_nfw_notification,
+	                               nyx_gps_nfw_cbs->user_data);
+}
+
 static const gnss_binder_callbacks gnss_cbs = {
 	.location_cb = gps_location_cb,
 	.status_cb = gps_status_cb,
@@ -537,7 +573,8 @@ static const gnss_binder_callbacks gnss_cbs = {
 	.geofence_add_cb = gps_geofence_add_cb,
 	.geofence_remove_cb = gps_geofence_remove_cb,
 	.geofence_pause_cb = gps_geofence_pause_cb,
-	.geofence_resume_cb = gps_geofence_resume_cb
+	.geofence_resume_cb = gps_geofence_resume_cb,
+	.nfw_notify_cb = gps_nfw_notify_cb
 };
 
 nyx_error_t init(nyx_device_handle_t handle,
@@ -624,6 +661,7 @@ nyx_error_t cleanup(nyx_device_handle_t handle)
 	nyx_agps_ril_cbs = NULL;
 	nyx_gps_ni_cbs = NULL;
 	nyx_gps_geofence_cbs = NULL;
+	nyx_gps_nfw_cbs = NULL;
 
 	return NYX_ERROR_NONE;
 }
@@ -891,6 +929,37 @@ nyx_error_t resume_geofence(nyx_device_handle_t handle, int32_t geofence_id,
 	       NYX_ERROR_NONE : NYX_ERROR_GENERIC;
 }
 
+nyx_error_t get_debug_data(nyx_device_handle_t handle, char *dest, size_t dest_len)
+{
+	if (handle != nyx_dev)
+		return NYX_ERROR_INVALID_HANDLE;
+
+	if (!dest || dest_len == 0)
+		return NYX_ERROR_INVALID_VALUE;
+
+	if (!gnss_binder_debug_available())
+		return NYX_ERROR_NOT_IMPLEMENTED;
+
+	return gnss_binder_get_debug_data(dest, dest_len) ?
+	       NYX_ERROR_NONE : NYX_ERROR_GENERIC;
+}
+
+nyx_error_t set_nfw_callback(nyx_device_handle_t handle,
+                             nyx_gps_nfw_callbacks_t *nfw_cbs)
+{
+	if (handle != nyx_dev)
+		return NYX_ERROR_INVALID_HANDLE;
+
+	/*
+	 * Accept the registration even without the extension so a caller can set
+	 * this up before init(); notifications simply never arrive on a HAL that
+	 * has no IGnssVisibilityControl.
+	 */
+	nyx_gps_nfw_cbs = nfw_cbs;
+
+	return gnss_binder_nfw_available() ? NYX_ERROR_NONE : NYX_ERROR_NOT_IMPLEMENTED;
+}
+
 nyx_error_t nyx_module_open(nyx_instance_t instance, nyx_device_t **device_ptr)
 {
 	nyx_error_t error;
@@ -972,6 +1041,7 @@ nyx_error_t nyx_module_close(nyx_device_t *device)
 	nyx_agps_ril_cbs = NULL;
 	nyx_gps_ni_cbs = NULL;
 	nyx_gps_geofence_cbs = NULL;
+	nyx_gps_nfw_cbs = NULL;
 
 	free(nyx_dev);
 	nyx_dev = NULL;

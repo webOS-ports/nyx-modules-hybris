@@ -85,6 +85,18 @@ typedef struct {
 	const char *notification_message;
 } gnss_binder_ni_notification;
 
+/* Mirrors IGnssVisibilityControlCallback.NfwNotification, strings copied out. */
+typedef struct {
+	const char *proxy_app_package_name;
+	uint8_t protocol_stack;
+	const char *other_protocol_stack_name;
+	uint8_t requestor;
+	const char *requestor_id;
+	uint8_t response_type;
+	bool in_emergency_mode;
+	bool is_cached_location;
+} gnss_binder_nfw_notification;
+
 typedef struct {
 	void (*location_cb)(const gnss_binder_location *location, void *user_data);
 	void (*status_cb)(uint16_t status, void *user_data);
@@ -121,6 +133,10 @@ typedef struct {
 	void (*geofence_remove_cb)(int32_t geofence_id, int32_t status, void *user_data);
 	void (*geofence_pause_cb)(int32_t geofence_id, int32_t status, void *user_data);
 	void (*geofence_resume_cb)(int32_t geofence_id, int32_t status, void *user_data);
+
+	/* Non-framework location access reports, from IGnssVisibilityControl. */
+	void (*nfw_notify_cb)(const gnss_binder_nfw_notification *notification,
+	                      void *user_data);
 } gnss_binder_callbacks;
 
 /*
@@ -190,6 +206,17 @@ bool gnss_binder_geofence_add(int32_t geofence_id, double latitude,
 bool gnss_binder_geofence_remove(int32_t geofence_id);
 bool gnss_binder_geofence_pause(int32_t geofence_id);
 bool gnss_binder_geofence_resume(int32_t geofence_id, int32_t monitor_transitions);
+
+/*
+ * IGnssDebug. Rendered as text rather than a struct: the HAL's DebugData
+ * carries a variable-length satellite array whose element layout is not pinned
+ * down across HAL versions, and nyx deliberately does not model it.
+ */
+bool gnss_binder_debug_available(void);
+bool gnss_binder_get_debug_data(char *dest, size_t dest_len);
+
+/* IGnssVisibilityControl. 2.x only; there is no @1.0 equivalent. */
+bool gnss_binder_nfw_available(void);
 
 /* Human-readable name of the bound HAL, e.g.
  * "android.hardware.gnss@1.1::IGnss/default", or NULL when not bound. Used to

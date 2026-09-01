@@ -84,6 +84,14 @@
  */
 #define GNSS_CONFIG_IFACE_1_0 "android.hardware.gnss@1.0::IGnssConfiguration"
 
+#define GNSS_DEBUG_IFACE_1_0 "android.hardware.gnss@1.0::IGnssDebug"
+
+/* Note the separate package: visibility_control, not gnss. */
+#define GNSS_VC_IFACE_1_0 \
+	"android.hardware.gnss.visibility_control@1.0::IGnssVisibilityControl"
+#define GNSS_VC_CALLBACK_IFACE_1_0 \
+	"android.hardware.gnss.visibility_control@1.0::IGnssVisibilityControlCallback"
+
 #define GNSS_NI_IFACE_1_0 "android.hardware.gnss@1.0::IGnssNi"
 #define GNSS_NI_CALLBACK_IFACE_1_0 "android.hardware.gnss@1.0::IGnssNiCallback"
 #define GNSS_GEOFENCING_IFACE_1_0 "android.hardware.gnss@1.0::IGnssGeofencing"
@@ -108,6 +116,7 @@ enum gnss_tx {
 	GNSS_TX_GET_EXTENSION_GEOFENCING = 10,
 	GNSS_TX_GET_EXTENSION_NI = 12,
 	GNSS_TX_GET_EXTENSION_CONFIG = 16,
+	GNSS_TX_GET_EXTENSION_DEBUG = 17,
 	GNSS_TX_GET_EXTENSION_XTRA = 15,
 
 	/*
@@ -117,7 +126,23 @@ enum gnss_tx {
 	 */
 	GNSS_TX_GET_EXTENSION_AGNSS_2_0 = 27,
 	GNSS_TX_GET_EXTENSION_AGNSS_RIL_2_0 = 28,
-	GNSS_TX_GET_EXTENSION_CONFIG_2_0 = 25
+	GNSS_TX_GET_EXTENSION_CONFIG_2_0 = 25,
+	GNSS_TX_GET_EXTENSION_DEBUG_2_0 = 26,
+	GNSS_TX_GET_EXTENSION_VISIBILITY_CONTROL = 31
+};
+
+enum gnss_debug_tx {
+	GNSS_DEBUG_TX_GET_DEBUG_DATA = 1
+};
+
+enum gnss_vc_tx {
+	GNSS_VC_TX_ENABLE_NFW_LOCATION_ACCESS = 1,
+	GNSS_VC_TX_SET_CALLBACK = 2
+};
+
+enum gnss_vc_callback_tx {
+	GNSS_VC_CB_TX_NFW_NOTIFY = 1,
+	GNSS_VC_CB_TX_IS_IN_EMERGENCY_SESSION = 2
 };
 
 enum gnss_config_tx {
@@ -311,6 +336,73 @@ typedef struct {
 	gint32 notificationIdEncoding;  /* 60 */
 } GnssNiNotificationHidl;
 
+/* android.hardware.gnss@1.0::IGnssDebug structures. */
+typedef struct {
+	guint8 valid;
+	guint8 pad0[7];
+	gdouble latitudeDegrees;
+	gdouble longitudeDegrees;
+	gfloat altitudeMeters;
+	gfloat speedMetersPerSecs;
+	gfloat bearingDegrees;
+	guint8 pad1[4];
+	gdouble horizontalAccuracyMeters;
+	gdouble verticalAccuracyMeters;
+	gdouble speedAccuracyMetersPerSecond;
+	gdouble bearingAccuracyDegrees;
+	gfloat ageSeconds;
+	guint8 pad2[4];
+} PositionDebugHidl;
+
+typedef struct {
+	gint64 timeEstimate;
+	gfloat timeUncertaintyNs;
+	gfloat frequencyUncertaintyNsPerSec;
+} TimeDebugHidl;
+
+typedef struct {
+	gint16 svid;
+	guint8 constellation;
+	guint8 ephemerisType;
+	guint8 ephemerisSource;
+	guint8 ephemerisHealth;
+	guint8 pad0[2];
+	gfloat ephemerisAgeSeconds;
+	guint8 serverPredictionIsAvailable;
+	guint8 pad1[3];
+	gfloat serverPredictionAgeSeconds;
+} SatelliteDataHidl;
+
+typedef struct {
+	PositionDebugHidl position;
+	TimeDebugHidl time;
+	guint64 satelliteDataArray[2]; /* hidl_vec, read separately */
+} DebugDataHidl;
+
+/*
+ * IGnssVisibilityControlCallback.NfwNotification. Three hidl_strings, read
+ * from the parcel after the struct in field order, exactly as the NI
+ * notification is.
+ */
+typedef struct {
+	guint64 proxyAppPackageName[2];
+	guint8 protocolStack;
+	guint8 pad0[7];
+	guint64 otherProtocolStackName[2];
+	guint8 requestor;
+	guint8 pad1[7];
+	guint64 requestorId[2];
+	guint8 responseType;
+	guint8 inEmergencyMode;
+	guint8 isCachedLocation;
+	guint8 pad2[5];
+} NfwNotificationHidl;
+
+G_STATIC_ASSERT(sizeof(PositionDebugHidl) == 80);
+G_STATIC_ASSERT(sizeof(TimeDebugHidl) == 16);
+G_STATIC_ASSERT(sizeof(SatelliteDataHidl) == 20);
+G_STATIC_ASSERT(sizeof(DebugDataHidl) == 112);
+G_STATIC_ASSERT(sizeof(NfwNotificationHidl) == 72);
 G_STATIC_ASSERT(sizeof(GnssNiNotificationHidl) == 64);
 G_STATIC_ASSERT(sizeof(AGnssStatusIpV4Hidl) == 8);
 G_STATIC_ASSERT(sizeof(AGnssRefLocationCellIDHidl) == 16);
@@ -349,6 +441,13 @@ typedef struct {
 	/* No callback object: IGnssConfiguration is setters only. */
 	GBinderRemoteObject *config_remote;
 	GBinderClient *config_client;
+
+	GBinderRemoteObject *debug_remote;
+	GBinderClient *debug_client;
+
+	GBinderRemoteObject *vc_remote;
+	GBinderClient *vc_client;
+	GBinderLocalObject *vc_callback_object;
 
 	gulong death_id;
 
@@ -1008,6 +1107,65 @@ static GBinderLocalReply *gnss_binder_geofence_callback_handler(GBinderLocalObje
  * with it, and keep the client only if both steps worked. Anything less is
  * torn down so the *_available() predicate stays truthful.
  */
+static GBinderLocalReply *gnss_binder_vc_callback_handler(GBinderLocalObject *obj,
+                                                          GBinderRemoteRequest *req,
+                                                          guint code, guint flags,
+                                                          int *status, void *user_data)
+{
+	GBinderReader reader;
+
+	(void) flags;
+	(void) user_data;
+
+	*status = GBINDER_STATUS_OK;
+
+	if (code == GNSS_VC_CB_TX_IS_IN_EMERGENCY_SESSION) {
+		/*
+		 * Unlike every other callback here this one generates a value, so it
+		 * must be answered or the HAL blocks waiting. LuneOS has no emergency
+		 * call state plumbed to this module, so answer false rather than
+		 * claim an emergency session that would bypass the user's consent.
+		 */
+		GBinderLocalReply *reply = gbinder_local_object_new_reply(obj);
+		GBinderWriter writer;
+
+		gbinder_local_reply_init_writer(reply, &writer);
+		gbinder_writer_append_int32(&writer, 0); /* hidl status: OK */
+		gbinder_writer_append_bool(&writer, FALSE);
+		return reply;
+	}
+
+	if (code != GNSS_VC_CB_TX_NFW_NOTIFY || !g_gnss.callbacks.nfw_notify_cb)
+		return NULL;
+
+	gbinder_remote_request_init_reader(req, &reader);
+
+	{
+		const NfwNotificationHidl *n =
+			gbinder_reader_read_hidl_struct(&reader, NfwNotificationHidl);
+		gnss_binder_nfw_notification out;
+
+		if (!n)
+			return NULL;
+
+		memset(&out, 0, sizeof(out));
+		out.protocol_stack = n->protocolStack;
+		out.requestor = n->requestor;
+		out.response_type = n->responseType;
+		out.in_emergency_mode = n->inEmergencyMode != 0;
+		out.is_cached_location = n->isCachedLocation != 0;
+
+		/* Field order: proxyAppPackageName, otherProtocolStackName, requestorId. */
+		out.proxy_app_package_name = gbinder_reader_read_hidl_string_c(&reader);
+		out.other_protocol_stack_name = gbinder_reader_read_hidl_string_c(&reader);
+		out.requestor_id = gbinder_reader_read_hidl_string_c(&reader);
+
+		g_gnss.callbacks.nfw_notify_cb(&out, g_gnss.user_data);
+	}
+
+	return NULL;
+}
+
 /*
  * One extension: fetch the interface, wrap it in a client, register our
  * callback object with it. The client is kept only if every step worked, so the
@@ -1139,6 +1297,36 @@ static void gnss_binder_setup_extensions(void)
 		g_gnss.config_client = gbinder_client_new(g_gnss.config_remote,
 		                                          GNSS_CONFIG_IFACE_1_0);
 	}
+
+	/*
+	 * IGnssDebug. getDebugData is declared in @1.0, so even when the object
+	 * comes from getExtensionGnssDebug_2_0 it is addressed as @1.0::IGnssDebug.
+	 */
+	g_gnss.debug_remote = gnss_binder_get_extension(g_gnss.agnss_is_2_0 ?
+	                                                g_gnss.client_2_0 : g_gnss.client,
+	                                                g_gnss.agnss_is_2_0 ?
+	                                                GNSS_TX_GET_EXTENSION_DEBUG_2_0 :
+	                                                GNSS_TX_GET_EXTENSION_DEBUG,
+	                                                "IGnssDebug");
+	if (g_gnss.debug_remote) {
+		gbinder_remote_object_ref(g_gnss.debug_remote);
+		g_gnss.debug_client = gbinder_client_new(g_gnss.debug_remote,
+		                                         GNSS_DEBUG_IFACE_1_0);
+	}
+
+	/*
+	 * IGnssVisibilityControl exists only from @2.0 - it is the replacement for
+	 * the NI model that @2.0 retires - so it is not looked for on a 1.x HAL.
+	 */
+	if (g_gnss.agnss_is_2_0)
+		gnss_binder_setup_extension(g_gnss.client_2_0,
+		                            GNSS_TX_GET_EXTENSION_VISIBILITY_CONTROL,
+		                            "IGnssVisibilityControl", GNSS_VC_IFACE_1_0,
+		                            GNSS_VC_CALLBACK_IFACE_1_0,
+		                            gnss_binder_vc_callback_handler,
+		                            GNSS_VC_TX_SET_CALLBACK, TRUE,
+		                            &g_gnss.vc_remote, &g_gnss.vc_client,
+		                            &g_gnss.vc_callback_object);
 
 	/* XTRA: predicted ephemeris, the largest cold-start TTFF saving. */
 	gnss_binder_setup_extension(g_gnss.client, GNSS_TX_GET_EXTENSION_XTRA,
@@ -1685,6 +1873,96 @@ bool gnss_binder_geofence_resume(int32_t geofence_id, int32_t monitor_transition
 	return true;
 }
 
+bool gnss_binder_debug_available(void)
+{
+	return g_gnss.debug_client != NULL;
+}
+
+bool gnss_binder_nfw_available(void)
+{
+	return g_gnss.vc_client != NULL;
+}
+
+bool gnss_binder_get_debug_data(char *dest, size_t dest_len)
+{
+	GBinderRemoteReply *reply;
+	int status = -1;
+	gboolean ok = FALSE;
+
+	if (!g_gnss.debug_client || !dest || dest_len == 0)
+		return false;
+
+	reply = gbinder_client_transact_sync_reply(g_gnss.debug_client,
+	                                           GNSS_DEBUG_TX_GET_DEBUG_DATA,
+	                                           gbinder_client_new_request(g_gnss.debug_client),
+	                                           &status);
+	if (!reply)
+		return false;
+
+	{
+		GBinderReader reader;
+		gint32 hidl_status = -1;
+		const DebugDataHidl *d;
+
+		gbinder_remote_reply_init_reader(reply, &reader);
+
+		if (gbinder_reader_read_int32(&reader, &hidl_status) && hidl_status == 0 &&
+		    (d = gbinder_reader_read_hidl_struct(&reader, DebugDataHidl)) != NULL) {
+			const SatelliteDataHidl *sats;
+			gsize count = 0;
+			gsize used;
+
+			used = (gsize) g_snprintf(dest, dest_len,
+			         "position: %s lat=%.6f lon=%.6f alt=%.1fm "
+			         "hacc=%.1fm vacc=%.1fm age=%.1fs\n"
+			         "time: estimate=%lld uncertainty=%.0fns drift=%.3fns/s\n",
+			         d->position.valid ? "valid" : "invalid",
+			         d->position.latitudeDegrees, d->position.longitudeDegrees,
+			         (double) d->position.altitudeMeters,
+			         d->position.horizontalAccuracyMeters,
+			         d->position.verticalAccuracyMeters,
+			         (double) d->position.ageSeconds,
+			         (long long) d->time.timeEstimate,
+			         (double) d->time.timeUncertaintyNs,
+			         (double) d->time.frequencyUncertaintyNsPerSec);
+
+			/*
+			 * The satellite array is a hidl_vec following the struct. Its
+			 * element layout depends on enum widths the HAL does not pin down,
+			 * so a mismatch makes this return NULL rather than misparse - in
+			 * which case the position and time above are still reported.
+			 */
+			sats = gbinder_reader_read_hidl_type_vec(&reader, SatelliteDataHidl,
+			                                         &count);
+
+			if (sats && used < dest_len) {
+				gsize i;
+
+				used += (gsize) g_snprintf(dest + used, dest_len - used,
+				                           "satellites: %u\n", (unsigned) count);
+
+				for (i = 0; i < count && used < dest_len; i++)
+					used += (gsize) g_snprintf(dest + used, dest_len - used,
+					          "  svid=%d constellation=%u ephemeris=%u "
+					          "source=%u health=%u age=%.0fs\n",
+					          sats[i].svid, sats[i].constellation,
+					          sats[i].ephemerisType, sats[i].ephemerisSource,
+					          sats[i].ephemerisHealth,
+					          (double) sats[i].ephemerisAgeSeconds);
+			} else if (used < dest_len) {
+				g_snprintf(dest + used, dest_len - used,
+				           "satellites: not reported\n");
+			}
+
+			ok = TRUE;
+		}
+
+		gbinder_remote_reply_unref(reply);
+	}
+
+	return ok;
+}
+
 const char *gnss_binder_provider_name(void)
 {
 	return g_gnss.bound ? g_gnss.provider_name : NULL;
@@ -1741,6 +2019,18 @@ void gnss_binder_cleanup(void)
 		gbinder_client_unref(g_gnss.config_client);
 		g_gnss.config_client = NULL;
 	}
+	if (g_gnss.debug_client) {
+		gbinder_client_unref(g_gnss.debug_client);
+		g_gnss.debug_client = NULL;
+	}
+	if (g_gnss.vc_client) {
+		gbinder_client_unref(g_gnss.vc_client);
+		g_gnss.vc_client = NULL;
+	}
+	if (g_gnss.vc_callback_object) {
+		gbinder_local_object_drop(g_gnss.vc_callback_object);
+		g_gnss.vc_callback_object = NULL;
+	}
 
 	if (g_gnss.callback_object) {
 		gbinder_local_object_drop(g_gnss.callback_object);
@@ -1790,6 +2080,14 @@ void gnss_binder_cleanup(void)
 	if (g_gnss.config_remote) {
 		gbinder_remote_object_unref(g_gnss.config_remote);
 		g_gnss.config_remote = NULL;
+	}
+	if (g_gnss.debug_remote) {
+		gbinder_remote_object_unref(g_gnss.debug_remote);
+		g_gnss.debug_remote = NULL;
+	}
+	if (g_gnss.vc_remote) {
+		gbinder_remote_object_unref(g_gnss.vc_remote);
+		g_gnss.vc_remote = NULL;
 	}
 
 	if (g_gnss.remote) {
