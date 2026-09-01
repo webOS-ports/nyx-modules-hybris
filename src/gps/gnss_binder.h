@@ -69,6 +69,22 @@ typedef struct {
 	gnss_binder_sv_info sv_list[GNSS_BINDER_MAX_SVS];
 } gnss_binder_sv_status;
 
+/*
+ * Mirrors android.hardware.gnss@1.0::IGnssNiCallback.GnssNiNotification, with
+ * the two hidl_strings already copied out.
+ */
+typedef struct {
+	int32_t notification_id;
+	uint8_t ni_type;
+	uint32_t notify_flags;
+	uint32_t timeout_secs;
+	uint8_t default_response;
+	int32_t requestor_id_encoding;
+	int32_t notification_id_encoding;
+	const char *requestor_id;
+	const char *notification_message;
+} gnss_binder_ni_notification;
+
 typedef struct {
 	void (*location_cb)(const gnss_binder_location *location, void *user_data);
 	void (*status_cb)(uint16_t status, void *user_data);
@@ -88,6 +104,23 @@ typedef struct {
 	void (*ril_request_set_id_cb)(uint32_t flags, void *user_data);
 	void (*ril_request_ref_loc_cb)(void *user_data);
 	void (*xtra_download_request_cb)(void *user_data);
+
+	/* Network-initiated location requests. */
+	void (*ni_notify_cb)(const gnss_binder_ni_notification *notification,
+	                     void *user_data);
+
+	/* Geofencing. location may be NULL when the HAL has no fix to report. */
+	void (*geofence_transition_cb)(int32_t geofence_id,
+	                               const gnss_binder_location *location,
+	                               int32_t transition, int64_t timestamp,
+	                               void *user_data);
+	void (*geofence_status_cb)(int32_t status,
+	                           const gnss_binder_location *last_location,
+	                           void *user_data);
+	void (*geofence_add_cb)(int32_t geofence_id, int32_t status, void *user_data);
+	void (*geofence_remove_cb)(int32_t geofence_id, int32_t status, void *user_data);
+	void (*geofence_pause_cb)(int32_t geofence_id, int32_t status, void *user_data);
+	void (*geofence_resume_cb)(int32_t geofence_id, int32_t status, void *user_data);
 } gnss_binder_callbacks;
 
 /*
@@ -138,6 +171,25 @@ bool gnss_binder_ril_update_network_availability(bool available, const char *apn
 
 bool gnss_binder_xtra_available(void);
 bool gnss_binder_xtra_inject_data(const char *data, int length);
+
+/*
+ * Network-initiated location. @2.0 requires getExtensionGnssNi() to return a
+ * null binder - the 2.x replacement is the different IGnssVisibilityControl
+ * model - so on a 2.x HAL this is legitimately unavailable.
+ */
+bool gnss_binder_ni_available(void);
+bool gnss_binder_ni_respond(int32_t notification_id, int32_t user_response);
+
+bool gnss_binder_geofence_available(void);
+bool gnss_binder_geofence_add(int32_t geofence_id, double latitude,
+                              double longitude, double radius_meters,
+                              int32_t last_transition,
+                              int32_t monitor_transitions,
+                              int32_t notification_responsiveness_ms,
+                              int32_t unknown_timer_ms);
+bool gnss_binder_geofence_remove(int32_t geofence_id);
+bool gnss_binder_geofence_pause(int32_t geofence_id);
+bool gnss_binder_geofence_resume(int32_t geofence_id, int32_t monitor_transitions);
 
 /* Human-readable name of the bound HAL, e.g.
  * "android.hardware.gnss@1.1::IGnss/default", or NULL when not bound. Used to

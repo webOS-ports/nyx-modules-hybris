@@ -89,6 +89,26 @@ G_STATIC_ASSERT(NYX_AGPS_RIL_NETWORK_TYPE_MOBILE == AGPS_RIL_NETWORK_TYPE_MOBILE
 G_STATIC_ASSERT(NYX_AGPS_RIL_NETWORK_TYPE_WIFI == AGPS_RIL_NETWORK_TYPE_WIFI);
 G_STATIC_ASSERT(NYX_AGPS_RIL_REQUEST_SETID_IMSI == AGPS_RIL_REQUEST_SETID_IMSI);
 G_STATIC_ASSERT(NYX_AGPS_RIL_REQUEST_SETID_MSISDN == AGPS_RIL_REQUEST_SETID_MSISDN);
+G_STATIC_ASSERT(NYX_GPS_NI_TYPE_VOICE == GPS_NI_TYPE_VOICE);
+G_STATIC_ASSERT(NYX_GPS_NI_TYPE_UMTS_SUPL == GPS_NI_TYPE_UMTS_SUPL);
+G_STATIC_ASSERT(NYX_GPS_NI_TYPE_UMTS_CTRL_PLANE == GPS_NI_TYPE_UMTS_CTRL_PLANE);
+G_STATIC_ASSERT(NYX_GPS_NI_NEED_NOTIFY == GPS_NI_NEED_NOTIFY);
+G_STATIC_ASSERT(NYX_GPS_NI_NEED_VERIFY == GPS_NI_NEED_VERIFY);
+G_STATIC_ASSERT(NYX_GPS_NI_PRIVACY_OVERRIDE == GPS_NI_PRIVACY_OVERRIDE);
+G_STATIC_ASSERT(NYX_GPS_NI_USER_RESPONSE_ACCEPT == GPS_NI_RESPONSE_ACCEPT);
+G_STATIC_ASSERT(NYX_GPS_NI_USER_RESPONSE_DENY == GPS_NI_RESPONSE_DENY);
+G_STATIC_ASSERT(NYX_GPS_NI_USER_RESPONSE_NORESP == GPS_NI_RESPONSE_NORESP);
+G_STATIC_ASSERT(NYX_GEOFENCER_ENTERED == GPS_GEOFENCE_ENTERED);
+G_STATIC_ASSERT(NYX_GEOFENCER_EXITED == GPS_GEOFENCE_EXITED);
+G_STATIC_ASSERT(NYX_GEOFENCER_UNCERTAIN == GPS_GEOFENCE_UNCERTAIN);
+G_STATIC_ASSERT(NYX_GEOFENCER_UNAVAILABLE == GPS_GEOFENCE_UNAVAILABLE);
+G_STATIC_ASSERT(NYX_GEOFENCER_AVAILABLE == GPS_GEOFENCE_AVAILABLE);
+G_STATIC_ASSERT(NYX_GEOFENCER_OPERATION_SUCCESS == GPS_GEOFENCE_OPERATION_SUCCESS);
+G_STATIC_ASSERT(NYX_GEOFENCER_ERROR_TOO_MANY_GEOFENCES == GPS_GEOFENCE_ERROR_TOO_MANY_GEOFENCES);
+G_STATIC_ASSERT(NYX_GEOFENCER_ERROR_ID_EXISTS == GPS_GEOFENCE_ERROR_ID_EXISTS);
+G_STATIC_ASSERT(NYX_GEOFENCER_ERROR_ID_UNKNOWN == GPS_GEOFENCE_ERROR_ID_UNKNOWN);
+G_STATIC_ASSERT(NYX_GEOFENCER_ERROR_INVALID_TRANSITION == GPS_GEOFENCE_ERROR_INVALID_TRANSITION);
+G_STATIC_ASSERT(NYX_GEOFENCER_ERROR_GENERIC == GPS_GEOFENCE_ERROR_GENERIC);
 
 typedef struct methodStringPair {
 	module_method_t mType;
@@ -133,7 +153,12 @@ static const methodStringPair_t mapAssistMethodString[] = {
 	{NYX_GPS_SET_SET_ID_MODULE_METHOD,                  "set_set_id"},
 	{NYX_GPS_UPDATE_NETWORK_STATE_MODULE_METHOD,        "update_network_state"},
 	{NYX_GPS_UPDATE_NETWORK_AVAILABILITY_MODULE_METHOD, "update_network_availability"},
-	{NYX_GPS_INJECT_XTRA_DATA_MODULE_METHOD,            "inject_xtra_data"}
+	{NYX_GPS_INJECT_XTRA_DATA_MODULE_METHOD,            "inject_xtra_data"},
+	{NYX_GPS_SEND_NI_RESPONSE_MODULE_METHOD,            "send_ni_response"},
+	{NYX_GPS_ADD_GEOFENCE_AREA_MODULE_METHOD,           "add_geofence_area"},
+	{NYX_GPS_REMOVE_GEOFENCE_AREA_MODULE_METHOD,        "remove_geofence_area"},
+	{NYX_GPS_PAUSE_GEOFENCE_MODULE_METHOD,              "pause_geofence"},
+	{NYX_GPS_RESUME_GEOFENCE_MODULE_METHOD,             "resume_geofence"}
 };
 
 static nyx_device_t *nyx_dev = NULL;
@@ -142,8 +167,12 @@ static nyx_gps_callbacks_t *nyx_gps_cbs = NULL;
 static nyx_gps_xtra_callbacks_t *nyx_gps_xtra_cbs = NULL;
 static nyx_agps_callbacks_t *nyx_agps_cbs = NULL;
 static nyx_agps_ril_callbacks_t *nyx_agps_ril_cbs = NULL;
+static nyx_gps_ni_callbacks_t *nyx_gps_ni_cbs = NULL;
+static nyx_gps_geofence_callbacks_t *nyx_gps_geofence_cbs = NULL;
 
 static nyx_agps_status_t g_agps_status;
+static nyx_gps_ni_notification_t g_ni_notification;
+static nyx_gps_location_t g_geofence_location;
 
 /* Reused across callbacks so a fix does not allocate on the binder thread. */
 static nyx_gps_location_t g_location;
@@ -365,6 +394,130 @@ static void gps_xtra_download_request_cb(void *user_data)
 		nyx_gps_xtra_cbs->xtra_download_request_cb(nyx_gps_xtra_cbs->user_data);
 }
 
+static void gps_ni_notify_cb(const gnss_binder_ni_notification *n, void *user_data)
+{
+	(void) user_data;
+
+	if (!nyx_gps_ni_cbs || !nyx_gps_ni_cbs->ni_notify_cb)
+		return;
+
+	memset(&g_ni_notification, 0, sizeof(g_ni_notification));
+	g_ni_notification.size = sizeof(g_ni_notification);
+	g_ni_notification.notification_id = n->notification_id;
+	g_ni_notification.ni_type = n->ni_type;
+	g_ni_notification.notify_flags = n->notify_flags;
+	g_ni_notification.timeout = (int) n->timeout_secs;
+	g_ni_notification.default_response = n->default_response;
+	g_ni_notification.requestor_id_encoding = n->requestor_id_encoding;
+	g_ni_notification.text_encoding = n->notification_id_encoding;
+
+	/*
+	 * nyx carries the strings inline in fixed buffers rather than by
+	 * pointer, so they are copied with truncation rather than referenced -
+	 * the parcel they came from is only valid for the duration of this
+	 * callback.
+	 */
+	if (n->requestor_id)
+		g_strlcpy(g_ni_notification.requestor_id, n->requestor_id,
+		          sizeof(g_ni_notification.requestor_id));
+	if (n->notification_message)
+		g_strlcpy(g_ni_notification.text, n->notification_message,
+		          sizeof(g_ni_notification.text));
+
+	nyx_gps_ni_cbs->ni_notify_cb(&g_ni_notification, nyx_gps_ni_cbs->user_data);
+}
+
+static void gps_geofence_transition_cb(int32_t geofence_id,
+                                       const gnss_binder_location *location,
+                                       int32_t transition, int64_t timestamp,
+                                       void *user_data)
+{
+	(void) user_data;
+
+	if (!nyx_gps_geofence_cbs || !nyx_gps_geofence_cbs->geofence_transition_cb)
+		return;
+
+	memset(&g_geofence_location, 0, sizeof(g_geofence_location));
+	g_geofence_location.size = sizeof(g_geofence_location);
+
+	if (location) {
+		g_geofence_location.flags = location->flags;
+		g_geofence_location.latitude = location->latitude;
+		g_geofence_location.longitude = location->longitude;
+		g_geofence_location.altitude = location->altitude;
+		g_geofence_location.speed = location->speed;
+		g_geofence_location.bearing = location->bearing;
+		g_geofence_location.accuracy = location->horizontal_accuracy;
+		g_geofence_location.vertical_accuracy = location->vertical_accuracy;
+		g_geofence_location.timestamp = location->timestamp;
+	}
+
+	nyx_gps_geofence_cbs->geofence_transition_cb(geofence_id,
+	                                             &g_geofence_location,
+	                                             transition, timestamp,
+	                                             nyx_gps_geofence_cbs->user_data);
+}
+
+static void gps_geofence_status_cb(int32_t status,
+                                   const gnss_binder_location *last_location,
+                                   void *user_data)
+{
+	(void) user_data;
+
+	if (!nyx_gps_geofence_cbs || !nyx_gps_geofence_cbs->geofence_status_cb)
+		return;
+
+	memset(&g_geofence_location, 0, sizeof(g_geofence_location));
+	g_geofence_location.size = sizeof(g_geofence_location);
+
+	if (last_location) {
+		g_geofence_location.flags = last_location->flags;
+		g_geofence_location.latitude = last_location->latitude;
+		g_geofence_location.longitude = last_location->longitude;
+		g_geofence_location.altitude = last_location->altitude;
+		g_geofence_location.timestamp = last_location->timestamp;
+	}
+
+	nyx_gps_geofence_cbs->geofence_status_cb(status, &g_geofence_location,
+	                                         nyx_gps_geofence_cbs->user_data);
+}
+
+static void gps_geofence_add_cb(int32_t geofence_id, int32_t status, void *user_data)
+{
+	(void) user_data;
+
+	if (nyx_gps_geofence_cbs && nyx_gps_geofence_cbs->geofence_add_cb)
+		nyx_gps_geofence_cbs->geofence_add_cb(geofence_id, status,
+		                                      nyx_gps_geofence_cbs->user_data);
+}
+
+static void gps_geofence_remove_cb(int32_t geofence_id, int32_t status, void *user_data)
+{
+	(void) user_data;
+
+	if (nyx_gps_geofence_cbs && nyx_gps_geofence_cbs->geofence_remove_cb)
+		nyx_gps_geofence_cbs->geofence_remove_cb(geofence_id, status,
+		                                         nyx_gps_geofence_cbs->user_data);
+}
+
+static void gps_geofence_pause_cb(int32_t geofence_id, int32_t status, void *user_data)
+{
+	(void) user_data;
+
+	if (nyx_gps_geofence_cbs && nyx_gps_geofence_cbs->geofence_pause_cb)
+		nyx_gps_geofence_cbs->geofence_pause_cb(geofence_id, status,
+		                                        nyx_gps_geofence_cbs->user_data);
+}
+
+static void gps_geofence_resume_cb(int32_t geofence_id, int32_t status, void *user_data)
+{
+	(void) user_data;
+
+	if (nyx_gps_geofence_cbs && nyx_gps_geofence_cbs->geofence_resume_cb)
+		nyx_gps_geofence_cbs->geofence_resume_cb(geofence_id, status,
+		                                         nyx_gps_geofence_cbs->user_data);
+}
+
 static const gnss_binder_callbacks gnss_cbs = {
 	.location_cb = gps_location_cb,
 	.status_cb = gps_status_cb,
@@ -377,7 +530,14 @@ static const gnss_binder_callbacks gnss_cbs = {
 	.agnss_status_cb = gps_agnss_status_cb,
 	.ril_request_set_id_cb = gps_ril_request_set_id_cb,
 	.ril_request_ref_loc_cb = gps_ril_request_ref_loc_cb,
-	.xtra_download_request_cb = gps_xtra_download_request_cb
+	.xtra_download_request_cb = gps_xtra_download_request_cb,
+	.ni_notify_cb = gps_ni_notify_cb,
+	.geofence_transition_cb = gps_geofence_transition_cb,
+	.geofence_status_cb = gps_geofence_status_cb,
+	.geofence_add_cb = gps_geofence_add_cb,
+	.geofence_remove_cb = gps_geofence_remove_cb,
+	.geofence_pause_cb = gps_geofence_pause_cb,
+	.geofence_resume_cb = gps_geofence_resume_cb
 };
 
 nyx_error_t init(nyx_device_handle_t handle,
@@ -388,14 +548,6 @@ nyx_error_t init(nyx_device_handle_t handle,
                  nyx_agps_ril_callbacks_t *agps_ril_cbs,
                  nyx_gps_geofence_callbacks_t *geofence_cbs)
 {
-	/*
-	 * NI and geofencing are still not implemented - they need IGnssNi and
-	 * IGnssGeofencing, which this module does not fetch - so their callbacks
-	 * are deliberately dropped rather than stored, matching the fact that
-	 * none of their methods are registered.
-	 */
-	(void) gps_ni_cbs;
-	(void) geofence_cbs;
 
 	if (nyx_dev == NULL)
 		return NYX_ERROR_DEVICE_NOT_EXIST;
@@ -407,12 +559,16 @@ nyx_error_t init(nyx_device_handle_t handle,
 	nyx_gps_xtra_cbs = xtra_cbs;
 	nyx_agps_cbs = agps_cbs;
 	nyx_agps_ril_cbs = agps_ril_cbs;
+	nyx_gps_ni_cbs = gps_ni_cbs;
+	nyx_gps_geofence_cbs = geofence_cbs;
 
 	if (!gnss_binder_init(&gnss_cbs, NULL)) {
 		nyx_gps_cbs = NULL;
 		nyx_gps_xtra_cbs = NULL;
 		nyx_agps_cbs = NULL;
 		nyx_agps_ril_cbs = NULL;
+		nyx_gps_ni_cbs = NULL;
+		nyx_gps_geofence_cbs = NULL;
 		return NYX_ERROR_DEVICE_UNAVAILABLE;
 	}
 
@@ -466,6 +622,8 @@ nyx_error_t cleanup(nyx_device_handle_t handle)
 	nyx_gps_xtra_cbs = NULL;
 	nyx_agps_cbs = NULL;
 	nyx_agps_ril_cbs = NULL;
+	nyx_gps_ni_cbs = NULL;
+	nyx_gps_geofence_cbs = NULL;
 
 	return NYX_ERROR_NONE;
 }
@@ -662,6 +820,77 @@ nyx_error_t inject_xtra_data(nyx_device_handle_t handle, char *data, int length)
 	       NYX_ERROR_NONE : NYX_ERROR_GENERIC;
 }
 
+nyx_error_t send_ni_response(nyx_device_handle_t handle, int notif_id,
+                             nyx_gps_ni_user_response_type_t user_response)
+{
+	if (handle != nyx_dev)
+		return NYX_ERROR_INVALID_HANDLE;
+
+	if (!gnss_binder_ni_available())
+		return NYX_ERROR_NOT_IMPLEMENTED;
+
+	return gnss_binder_ni_respond(notif_id, user_response) ?
+	       NYX_ERROR_NONE : NYX_ERROR_GENERIC;
+}
+
+nyx_error_t add_geofence_area(nyx_device_handle_t handle, int32_t geofence_id,
+                              double latitude, double longitude,
+                              double radius_meters, int last_transition,
+                              int monitor_transitions,
+                              int notification_responsiveness_ms,
+                              int unknown_timer_ms)
+{
+	if (handle != nyx_dev)
+		return NYX_ERROR_INVALID_HANDLE;
+
+	if (!gnss_binder_geofence_available())
+		return NYX_ERROR_NOT_IMPLEMENTED;
+
+	return gnss_binder_geofence_add(geofence_id, latitude, longitude,
+	                                radius_meters, last_transition,
+	                                monitor_transitions,
+	                                notification_responsiveness_ms,
+	                                unknown_timer_ms) ?
+	       NYX_ERROR_NONE : NYX_ERROR_GENERIC;
+}
+
+nyx_error_t remove_geofence_area(nyx_device_handle_t handle, int32_t geofence_id)
+{
+	if (handle != nyx_dev)
+		return NYX_ERROR_INVALID_HANDLE;
+
+	if (!gnss_binder_geofence_available())
+		return NYX_ERROR_NOT_IMPLEMENTED;
+
+	return gnss_binder_geofence_remove(geofence_id) ?
+	       NYX_ERROR_NONE : NYX_ERROR_GENERIC;
+}
+
+nyx_error_t pause_geofence(nyx_device_handle_t handle, int32_t geofence_id)
+{
+	if (handle != nyx_dev)
+		return NYX_ERROR_INVALID_HANDLE;
+
+	if (!gnss_binder_geofence_available())
+		return NYX_ERROR_NOT_IMPLEMENTED;
+
+	return gnss_binder_geofence_pause(geofence_id) ?
+	       NYX_ERROR_NONE : NYX_ERROR_GENERIC;
+}
+
+nyx_error_t resume_geofence(nyx_device_handle_t handle, int32_t geofence_id,
+                            int monitor_transitions)
+{
+	if (handle != nyx_dev)
+		return NYX_ERROR_INVALID_HANDLE;
+
+	if (!gnss_binder_geofence_available())
+		return NYX_ERROR_NOT_IMPLEMENTED;
+
+	return gnss_binder_geofence_resume(geofence_id, monitor_transitions) ?
+	       NYX_ERROR_NONE : NYX_ERROR_GENERIC;
+}
+
 nyx_error_t nyx_module_open(nyx_instance_t instance, nyx_device_t **device_ptr)
 {
 	nyx_error_t error;
@@ -741,6 +970,8 @@ nyx_error_t nyx_module_close(nyx_device_t *device)
 	nyx_gps_xtra_cbs = NULL;
 	nyx_agps_cbs = NULL;
 	nyx_agps_ril_cbs = NULL;
+	nyx_gps_ni_cbs = NULL;
+	nyx_gps_geofence_cbs = NULL;
 
 	free(nyx_dev);
 	nyx_dev = NULL;

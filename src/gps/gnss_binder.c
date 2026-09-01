@@ -77,6 +77,11 @@
 #define AGNSS_CALLBACK_IFACE_2_0 "android.hardware.gnss@2.0::IAGnssCallback"
 #define AGNSS_RIL_IFACE_2_0 "android.hardware.gnss@2.0::IAGnssRil"
 
+#define GNSS_NI_IFACE_1_0 "android.hardware.gnss@1.0::IGnssNi"
+#define GNSS_NI_CALLBACK_IFACE_1_0 "android.hardware.gnss@1.0::IGnssNiCallback"
+#define GNSS_GEOFENCING_IFACE_1_0 "android.hardware.gnss@1.0::IGnssGeofencing"
+#define GNSS_GEOFENCE_CALLBACK_IFACE_1_0 "android.hardware.gnss@1.0::IGnssGeofenceCallback"
+
 /*
  * Transaction codes are the 1-based declaration order of the methods in
  * IGnss.hal / IGnssCallback.hal. Verified against
@@ -93,6 +98,8 @@ enum gnss_tx {
 	GNSS_TX_SET_POSITION_MODE = 8,
 	GNSS_TX_GET_EXTENSION_AGNSS_RIL = 9,
 	GNSS_TX_GET_EXTENSION_AGNSS = 11,
+	GNSS_TX_GET_EXTENSION_GEOFENCING = 10,
+	GNSS_TX_GET_EXTENSION_NI = 12,
 	GNSS_TX_GET_EXTENSION_XTRA = 15,
 
 	/*
@@ -118,6 +125,32 @@ enum agnss_ril_tx {
 	AGNSS_RIL_TX_SET_SET_ID = 3,
 	AGNSS_RIL_TX_UPDATE_NETWORK_STATE = 4,
 	AGNSS_RIL_TX_UPDATE_NETWORK_AVAILABILITY = 5
+};
+
+enum gnss_ni_tx {
+	GNSS_NI_TX_SET_CALLBACK = 1,
+	GNSS_NI_TX_RESPOND = 2
+};
+
+enum gnss_geofencing_tx {
+	GNSS_GEOFENCING_TX_SET_CALLBACK = 1,
+	GNSS_GEOFENCING_TX_ADD = 2,
+	GNSS_GEOFENCING_TX_PAUSE = 3,
+	GNSS_GEOFENCING_TX_RESUME = 4,
+	GNSS_GEOFENCING_TX_REMOVE = 5
+};
+
+enum gnss_ni_callback_tx {
+	GNSS_NI_CB_TX_NOTIFY = 1
+};
+
+enum gnss_geofence_callback_tx {
+	GNSS_GEOFENCE_CB_TX_TRANSITION = 1,
+	GNSS_GEOFENCE_CB_TX_STATUS = 2,
+	GNSS_GEOFENCE_CB_TX_ADD = 3,
+	GNSS_GEOFENCE_CB_TX_REMOVE = 4,
+	GNSS_GEOFENCE_CB_TX_PAUSE = 5,
+	GNSS_GEOFENCE_CB_TX_RESUME = 6
 };
 
 enum gnss_xtra_tx {
@@ -220,6 +253,36 @@ typedef struct {
 	AGnssRefLocationCellIDHidl cellID;
 } AGnssRefLocationHidl;
 
+/*
+ * android.hardware.gnss@1.0::IGnssNiCallback.GnssNiNotification.
+ *
+ * The two hidl_string members are 16 bytes on both 32- and 64-bit builds -
+ * hidl_pointer pads itself to 8 - so this layout is architecture independent,
+ * which the size assert below pins down. The strings themselves are separate
+ * buffer objects in the parcel and are read after the struct, not from it.
+ */
+typedef struct {
+	gint32 notificationId;   /* 0 */
+	guint8 niType;           /* 4, uint8_t enum */
+	guint8 pad0[3];
+	guint32 notifyFlags;     /* 8 */
+	guint32 timeoutSecs;     /* 12 */
+	guint8 defaultResponse;  /* 16, uint8_t enum */
+	guint8 pad1[7];
+	/*
+	 * The two hidl_string members. Declared as guint64 pairs rather than
+	 * byte arrays so the compiler gives them the 8-byte alignment a real
+	 * hidl_string has - a guint8[16] aligns to 1 and would silently pull
+	 * everything after it seven bytes forward. Their contents are never read
+	 * from here; the strings arrive as separate buffer objects.
+	 */
+	guint64 requestorId[2];         /* 24 */
+	guint64 notificationMessage[2]; /* 40 */
+	gint32 requestorIdEncoding;     /* 56 */
+	gint32 notificationIdEncoding;  /* 60 */
+} GnssNiNotificationHidl;
+
+G_STATIC_ASSERT(sizeof(GnssNiNotificationHidl) == 64);
 G_STATIC_ASSERT(sizeof(AGnssStatusIpV4Hidl) == 8);
 G_STATIC_ASSERT(sizeof(AGnssRefLocationCellIDHidl) == 16);
 G_STATIC_ASSERT(sizeof(AGnssRefLocationHidl) == 20);
@@ -245,6 +308,14 @@ typedef struct {
 	GBinderRemoteObject *xtra_remote;
 	GBinderClient *xtra_client;
 	GBinderLocalObject *xtra_callback_object;
+
+	GBinderRemoteObject *ni_remote;
+	GBinderClient *ni_client;
+	GBinderLocalObject *ni_callback_object;
+
+	GBinderRemoteObject *geofence_remote;
+	GBinderClient *geofence_client;
+	GBinderLocalObject *geofence_callback_object;
 
 	gulong death_id;
 
@@ -731,11 +802,219 @@ static GBinderLocalReply *gnss_binder_xtra_callback_handler(GBinderLocalObject *
 	return NULL;
 }
 
+static GBinderLocalReply *gnss_binder_ni_callback_handler(GBinderLocalObject *obj,
+                                                          GBinderRemoteRequest *req,
+                                                          guint code, guint flags,
+                                                          int *status, void *user_data)
+{
+	GBinderReader reader;
+
+	(void) obj;
+	(void) flags;
+	(void) user_data;
+
+	*status = GBINDER_STATUS_OK;
+
+	if (code != GNSS_NI_CB_TX_NOTIFY || !g_gnss.callbacks.ni_notify_cb)
+		return NULL;
+
+	gbinder_remote_request_init_reader(req, &reader);
+
+	{
+		const GnssNiNotificationHidl *n =
+			gbinder_reader_read_hidl_struct(&reader, GnssNiNotificationHidl);
+		gnss_binder_ni_notification out;
+
+		if (!n)
+			return NULL;
+
+		memset(&out, 0, sizeof(out));
+		out.notification_id = n->notificationId;
+		out.ni_type = n->niType;
+		out.notify_flags = n->notifyFlags;
+		out.timeout_secs = n->timeoutSecs;
+		out.default_response = n->defaultResponse;
+		out.requestor_id_encoding = n->requestorIdEncoding;
+		out.notification_id_encoding = n->notificationIdEncoding;
+
+		/*
+		 * A hidl_string inside a struct is written as its own buffer object
+		 * following the parent, in field order, so the pointers embedded in
+		 * the struct above are meaningless to us and the text has to be read
+		 * from the parcel instead. Order matters: requestorId then
+		 * notificationMessage.
+		 */
+		out.requestor_id = gbinder_reader_read_hidl_string_c(&reader);
+		out.notification_message = gbinder_reader_read_hidl_string_c(&reader);
+
+		g_gnss.callbacks.ni_notify_cb(&out, g_gnss.user_data);
+	}
+
+	return NULL;
+}
+
+/*
+ * addGeofence, removeGeofence, pauseGeofence and resumeGeofence all report back
+ * as (geofenceId, GeofenceStatus), so they share one decode. The status values
+ * are already the NYX_GEOFENCER_* ones - both sides use OPERATION_SUCCESS 0 and
+ * the same negative error codes - so they pass straight through.
+ */
+static void gnss_binder_dispatch_geofence_result(GBinderReader *reader, guint code)
+{
+	gint32 geofence_id = 0;
+	gint32 st = 0;
+
+	if (!gbinder_reader_read_int32(reader, &geofence_id) ||
+	    !gbinder_reader_read_int32(reader, &st))
+		return;
+
+	switch (code) {
+	case GNSS_GEOFENCE_CB_TX_ADD:
+		if (g_gnss.callbacks.geofence_add_cb)
+			g_gnss.callbacks.geofence_add_cb(geofence_id, st, g_gnss.user_data);
+		break;
+	case GNSS_GEOFENCE_CB_TX_REMOVE:
+		if (g_gnss.callbacks.geofence_remove_cb)
+			g_gnss.callbacks.geofence_remove_cb(geofence_id, st, g_gnss.user_data);
+		break;
+	case GNSS_GEOFENCE_CB_TX_PAUSE:
+		if (g_gnss.callbacks.geofence_pause_cb)
+			g_gnss.callbacks.geofence_pause_cb(geofence_id, st, g_gnss.user_data);
+		break;
+	default:
+		if (g_gnss.callbacks.geofence_resume_cb)
+			g_gnss.callbacks.geofence_resume_cb(geofence_id, st, g_gnss.user_data);
+		break;
+	}
+}
+
+static GBinderLocalReply *gnss_binder_geofence_callback_handler(GBinderLocalObject *obj,
+                                                                GBinderRemoteRequest *req,
+                                                                guint code, guint flags,
+                                                                int *status, void *user_data)
+{
+	GBinderReader reader;
+
+	(void) obj;
+	(void) flags;
+	(void) user_data;
+
+	*status = GBINDER_STATUS_OK;
+	gbinder_remote_request_init_reader(req, &reader);
+
+	switch (code) {
+	case GNSS_GEOFENCE_CB_TX_TRANSITION: {
+		const GnssLocationHidl *loc;
+		gint32 geofence_id = 0;
+		gint32 transition = 0;
+		guint64 timestamp = 0;
+		gnss_binder_location out;
+
+		if (!gbinder_reader_read_int32(&reader, &geofence_id))
+			break;
+
+		loc = gbinder_reader_read_hidl_struct(&reader, GnssLocationHidl);
+
+		if (!gbinder_reader_read_int32(&reader, &transition) ||
+		    !gbinder_reader_read_uint64(&reader, &timestamp))
+			break;
+
+		if (!g_gnss.callbacks.geofence_transition_cb)
+			break;
+
+		if (loc) {
+			gnss_binder_convert_location(loc, &out);
+			g_gnss.callbacks.geofence_transition_cb(geofence_id, &out,
+			                                        transition,
+			                                        (int64_t) timestamp,
+			                                        g_gnss.user_data);
+		} else {
+			g_gnss.callbacks.geofence_transition_cb(geofence_id, NULL,
+			                                        transition,
+			                                        (int64_t) timestamp,
+			                                        g_gnss.user_data);
+		}
+		break;
+	}
+	case GNSS_GEOFENCE_CB_TX_STATUS: {
+		const GnssLocationHidl *loc;
+		gint32 st = 0;
+		gnss_binder_location out;
+
+		if (!gbinder_reader_read_int32(&reader, &st))
+			break;
+
+		loc = gbinder_reader_read_hidl_struct(&reader, GnssLocationHidl);
+
+		if (!g_gnss.callbacks.geofence_status_cb)
+			break;
+
+		if (loc) {
+			gnss_binder_convert_location(loc, &out);
+			g_gnss.callbacks.geofence_status_cb(st, &out, g_gnss.user_data);
+		} else {
+			g_gnss.callbacks.geofence_status_cb(st, NULL, g_gnss.user_data);
+		}
+		break;
+	}
+	case GNSS_GEOFENCE_CB_TX_ADD:
+	case GNSS_GEOFENCE_CB_TX_REMOVE:
+	case GNSS_GEOFENCE_CB_TX_PAUSE:
+	case GNSS_GEOFENCE_CB_TX_RESUME:
+		gnss_binder_dispatch_geofence_result(&reader, code);
+		break;
+	default:
+		break;
+	}
+
+	return NULL;
+}
+
 /*
  * Brings up one extension: fetch the interface, register our callback object
  * with it, and keep the client only if both steps worked. Anything less is
  * torn down so the *_available() predicate stays truthful.
  */
+/*
+ * One extension: fetch the interface, wrap it in a client, register our
+ * callback object with it. The client is kept only if every step worked, so the
+ * *_available() predicates stay truthful. A HAL that does not implement an
+ * extension answers getExtension* with a null binder rather than an error, so
+ * that outcome is reported as absence, not failure.
+ */
+static void gnss_binder_setup_extension(GBinderClient *from, guint32 get_code,
+                                        const char *what, const char *iface,
+                                        const char *cb_iface,
+                                        GBinderLocalTransactFunc handler,
+                                        guint32 set_callback_code,
+                                        gboolean set_callback_returns_bool,
+                                        GBinderRemoteObject **remote_out,
+                                        GBinderClient **client_out,
+                                        GBinderLocalObject **cb_out)
+{
+	GBinderRemoteObject *remote = gnss_binder_get_extension(from, get_code, what);
+	GBinderLocalRequest *req;
+
+	if (!remote)
+		return;
+
+	*remote_out = gbinder_remote_object_ref(remote);
+	*client_out = gbinder_client_new(remote, iface);
+	*cb_out = gbinder_servicemanager_new_local_object(g_gnss.sm, cb_iface,
+	                                                  handler, NULL);
+
+	if (!*client_out || !*cb_out)
+		return;
+
+	req = gbinder_client_new_request(*client_out);
+	gbinder_local_request_append_local_object(req, *cb_out);
+
+	if (set_callback_returns_bool)
+		gnss_binder_client_transact_bool(*client_out, set_callback_code, req);
+	else
+		gnss_binder_client_transact_void(*client_out, set_callback_code, req);
+}
+
 static void gnss_binder_setup_extensions(void)
 {
 	/*
@@ -750,95 +1029,69 @@ static void gnss_binder_setup_extensions(void)
 	}
 
 	/* A-GNSS (SUPL): server configuration and data-connection handshake. */
-	g_gnss.agnss_remote = g_gnss.agnss_is_2_0 ?
-		gnss_binder_get_extension(g_gnss.client_2_0,
-		                          GNSS_TX_GET_EXTENSION_AGNSS_2_0, "IAGnss@2.0") :
-		gnss_binder_get_extension(g_gnss.client,
-		                          GNSS_TX_GET_EXTENSION_AGNSS, "IAGnss");
-	if (g_gnss.agnss_remote) {
-		gbinder_remote_object_ref(g_gnss.agnss_remote);
-		g_gnss.agnss_client = gbinder_client_new(g_gnss.agnss_remote,
-		                                         g_gnss.agnss_is_2_0 ?
-		                                         AGNSS_IFACE_2_0 : AGNSS_IFACE_1_0);
-		g_gnss.agnss_callback_object =
-			gbinder_servicemanager_new_local_object(g_gnss.sm,
-			                                        g_gnss.agnss_is_2_0 ?
-			                                        AGNSS_CALLBACK_IFACE_2_0 :
-			                                        AGNSS_CALLBACK_IFACE_1_0,
-			                                        gnss_binder_agnss_callback_handler,
-			                                        NULL);
+	gnss_binder_setup_extension(g_gnss.agnss_is_2_0 ? g_gnss.client_2_0 : g_gnss.client,
+	                            g_gnss.agnss_is_2_0 ?
+	                            GNSS_TX_GET_EXTENSION_AGNSS_2_0 :
+	                            GNSS_TX_GET_EXTENSION_AGNSS,
+	                            g_gnss.agnss_is_2_0 ? "IAGnss@2.0" : "IAGnss",
+	                            g_gnss.agnss_is_2_0 ? AGNSS_IFACE_2_0 : AGNSS_IFACE_1_0,
+	                            g_gnss.agnss_is_2_0 ? AGNSS_CALLBACK_IFACE_2_0 :
+	                            AGNSS_CALLBACK_IFACE_1_0,
+	                            gnss_binder_agnss_callback_handler,
+	                            AGNSS_TX_SET_CALLBACK, FALSE,
+	                            &g_gnss.agnss_remote, &g_gnss.agnss_client,
+	                            &g_gnss.agnss_callback_object);
 
-		if (g_gnss.agnss_client && g_gnss.agnss_callback_object) {
-			GBinderLocalRequest *req =
-				gbinder_client_new_request(g_gnss.agnss_client);
+	/*
+	 * A-GNSS RIL: the side that actually benefits from a SIM. @2.0::IAGnssRil
+	 * extends @1.0, so every method used here keeps its inherited transaction
+	 * code and only the interface name on the wire differs; the callback stays
+	 * the @1.0 one for the same reason.
+	 */
+	gnss_binder_setup_extension(g_gnss.agnss_is_2_0 ? g_gnss.client_2_0 : g_gnss.client,
+	                            g_gnss.agnss_is_2_0 ?
+	                            GNSS_TX_GET_EXTENSION_AGNSS_RIL_2_0 :
+	                            GNSS_TX_GET_EXTENSION_AGNSS_RIL,
+	                            g_gnss.agnss_is_2_0 ? "IAGnssRil@2.0" : "IAGnssRil",
+	                            g_gnss.agnss_is_2_0 ? AGNSS_RIL_IFACE_2_0 :
+	                            AGNSS_RIL_IFACE_1_0,
+	                            AGNSS_RIL_CALLBACK_IFACE_1_0,
+	                            gnss_binder_ril_callback_handler,
+	                            AGNSS_RIL_TX_SET_CALLBACK, FALSE,
+	                            &g_gnss.ril_remote, &g_gnss.ril_client,
+	                            &g_gnss.ril_callback_object);
 
-			gbinder_local_request_append_local_object(req,
-			                                          g_gnss.agnss_callback_object);
-			gnss_binder_client_transact_void(g_gnss.agnss_client,
-			                                 AGNSS_TX_SET_CALLBACK, req);
-		}
-	}
+	/*
+	 * NI: network-initiated location requests. @2.0 requires
+	 * getExtensionGnssNi() to return null - its replacement is the different
+	 * IGnssVisibilityControl model - so on a 2.x HAL this is expected to be
+	 * absent rather than broken.
+	 */
+	gnss_binder_setup_extension(g_gnss.client, GNSS_TX_GET_EXTENSION_NI,
+	                            "IGnssNi", GNSS_NI_IFACE_1_0,
+	                            GNSS_NI_CALLBACK_IFACE_1_0,
+	                            gnss_binder_ni_callback_handler,
+	                            GNSS_NI_TX_SET_CALLBACK, FALSE,
+	                            &g_gnss.ni_remote, &g_gnss.ni_client,
+	                            &g_gnss.ni_callback_object);
 
-	/* A-GNSS RIL: the side that actually benefits from a SIM. */
-	g_gnss.ril_remote = g_gnss.agnss_is_2_0 ?
-		gnss_binder_get_extension(g_gnss.client_2_0,
-		                          GNSS_TX_GET_EXTENSION_AGNSS_RIL_2_0,
-		                          "IAGnssRil@2.0") :
-		gnss_binder_get_extension(g_gnss.client,
-		                          GNSS_TX_GET_EXTENSION_AGNSS_RIL, "IAGnssRil");
-	if (g_gnss.ril_remote) {
-		gbinder_remote_object_ref(g_gnss.ril_remote);
-		/*
-		 * @2.0::IAGnssRil extends @1.0, so every method this module calls
-		 * keeps its inherited transaction code and only the interface name
-		 * on the wire differs. The callback object stays the @1.0 one for
-		 * the same reason.
-		 */
-		g_gnss.ril_client = gbinder_client_new(g_gnss.ril_remote,
-		                                       g_gnss.agnss_is_2_0 ?
-		                                       AGNSS_RIL_IFACE_2_0 :
-		                                       AGNSS_RIL_IFACE_1_0);
-		g_gnss.ril_callback_object =
-			gbinder_servicemanager_new_local_object(g_gnss.sm,
-			                                        AGNSS_RIL_CALLBACK_IFACE_1_0,
-			                                        gnss_binder_ril_callback_handler,
-			                                        NULL);
-
-		if (g_gnss.ril_client && g_gnss.ril_callback_object) {
-			GBinderLocalRequest *req =
-				gbinder_client_new_request(g_gnss.ril_client);
-
-			gbinder_local_request_append_local_object(req,
-			                                          g_gnss.ril_callback_object);
-			gnss_binder_client_transact_void(g_gnss.ril_client,
-			                                 AGNSS_RIL_TX_SET_CALLBACK, req);
-		}
-	}
+	/* Geofencing: the chip watches the fences so nothing has to poll GPS. */
+	gnss_binder_setup_extension(g_gnss.client, GNSS_TX_GET_EXTENSION_GEOFENCING,
+	                            "IGnssGeofencing", GNSS_GEOFENCING_IFACE_1_0,
+	                            GNSS_GEOFENCE_CALLBACK_IFACE_1_0,
+	                            gnss_binder_geofence_callback_handler,
+	                            GNSS_GEOFENCING_TX_SET_CALLBACK, FALSE,
+	                            &g_gnss.geofence_remote, &g_gnss.geofence_client,
+	                            &g_gnss.geofence_callback_object);
 
 	/* XTRA: predicted ephemeris, the largest cold-start TTFF saving. */
-	g_gnss.xtra_remote = gnss_binder_get_extension(g_gnss.client,
-	                                               GNSS_TX_GET_EXTENSION_XTRA,
-	                                               "IGnssXtra");
-	if (g_gnss.xtra_remote) {
-		gbinder_remote_object_ref(g_gnss.xtra_remote);
-		g_gnss.xtra_client = gbinder_client_new(g_gnss.xtra_remote,
-		                                        GNSS_XTRA_IFACE_1_0);
-		g_gnss.xtra_callback_object =
-			gbinder_servicemanager_new_local_object(g_gnss.sm,
-			                                        GNSS_XTRA_CALLBACK_IFACE_1_0,
-			                                        gnss_binder_xtra_callback_handler,
-			                                        NULL);
-
-		if (g_gnss.xtra_client && g_gnss.xtra_callback_object) {
-			GBinderLocalRequest *req =
-				gbinder_client_new_request(g_gnss.xtra_client);
-
-			gbinder_local_request_append_local_object(req,
-			                                          g_gnss.xtra_callback_object);
-			gnss_binder_client_transact_bool(g_gnss.xtra_client,
-			                                 GNSS_XTRA_TX_SET_CALLBACK, req);
-		}
-	}
+	gnss_binder_setup_extension(g_gnss.client, GNSS_TX_GET_EXTENSION_XTRA,
+	                            "IGnssXtra", GNSS_XTRA_IFACE_1_0,
+	                            GNSS_XTRA_CALLBACK_IFACE_1_0,
+	                            gnss_binder_xtra_callback_handler,
+	                            GNSS_XTRA_TX_SET_CALLBACK, TRUE,
+	                            &g_gnss.xtra_remote, &g_gnss.xtra_client,
+	                            &g_gnss.xtra_callback_object);
 }
 
 /*
@@ -1242,6 +1495,115 @@ bool gnss_binder_xtra_inject_data(const char *data, int length)
 	return ok;
 }
 
+bool gnss_binder_ni_available(void)
+{
+	return g_gnss.ni_client != NULL;
+}
+
+bool gnss_binder_ni_respond(int32_t notification_id, int32_t user_response)
+{
+	GBinderLocalRequest *req;
+	GBinderWriter writer;
+
+	if (!g_gnss.ni_client)
+		return false;
+
+	req = gbinder_client_new_request(g_gnss.ni_client);
+	gbinder_local_request_init_writer(req, &writer);
+	gbinder_writer_append_int32(&writer, notification_id);
+	gbinder_writer_append_int32(&writer, user_response);
+
+	gnss_binder_client_transact_void(g_gnss.ni_client, GNSS_NI_TX_RESPOND, req);
+	return true;
+}
+
+bool gnss_binder_geofence_available(void)
+{
+	return g_gnss.geofence_client != NULL;
+}
+
+bool gnss_binder_geofence_add(int32_t geofence_id, double latitude,
+                              double longitude, double radius_meters,
+                              int32_t last_transition,
+                              int32_t monitor_transitions,
+                              int32_t notification_responsiveness_ms,
+                              int32_t unknown_timer_ms)
+{
+	GBinderLocalRequest *req;
+	GBinderWriter writer;
+
+	if (!g_gnss.geofence_client)
+		return false;
+
+	req = gbinder_client_new_request(g_gnss.geofence_client);
+	gbinder_local_request_init_writer(req, &writer);
+	gbinder_writer_append_int32(&writer, geofence_id);
+	gbinder_writer_append_double(&writer, latitude);
+	gbinder_writer_append_double(&writer, longitude);
+	gbinder_writer_append_double(&writer, radius_meters);
+	gbinder_writer_append_int32(&writer, last_transition);
+	gbinder_writer_append_int32(&writer, monitor_transitions);
+	gbinder_writer_append_int32(&writer, notification_responsiveness_ms);
+	gbinder_writer_append_int32(&writer, unknown_timer_ms);
+
+	/* addGeofence generates no value; the outcome arrives on gnssGeofenceAddCb. */
+	gnss_binder_client_transact_void(g_gnss.geofence_client,
+	                                 GNSS_GEOFENCING_TX_ADD, req);
+	return true;
+}
+
+bool gnss_binder_geofence_remove(int32_t geofence_id)
+{
+	GBinderLocalRequest *req;
+	GBinderWriter writer;
+
+	if (!g_gnss.geofence_client)
+		return false;
+
+	req = gbinder_client_new_request(g_gnss.geofence_client);
+	gbinder_local_request_init_writer(req, &writer);
+	gbinder_writer_append_int32(&writer, geofence_id);
+
+	gnss_binder_client_transact_void(g_gnss.geofence_client,
+	                                 GNSS_GEOFENCING_TX_REMOVE, req);
+	return true;
+}
+
+bool gnss_binder_geofence_pause(int32_t geofence_id)
+{
+	GBinderLocalRequest *req;
+	GBinderWriter writer;
+
+	if (!g_gnss.geofence_client)
+		return false;
+
+	req = gbinder_client_new_request(g_gnss.geofence_client);
+	gbinder_local_request_init_writer(req, &writer);
+	gbinder_writer_append_int32(&writer, geofence_id);
+
+	gnss_binder_client_transact_void(g_gnss.geofence_client,
+	                                 GNSS_GEOFENCING_TX_PAUSE, req);
+	return true;
+}
+
+bool gnss_binder_geofence_resume(int32_t geofence_id, int32_t monitor_transitions)
+{
+	GBinderLocalRequest *req;
+	GBinderWriter writer;
+
+	if (!g_gnss.geofence_client)
+		return false;
+
+	req = gbinder_client_new_request(g_gnss.geofence_client);
+	gbinder_local_request_init_writer(req, &writer);
+	gbinder_writer_append_int32(&writer, geofence_id);
+	gbinder_writer_append_int32(&writer, monitor_transitions);
+
+	gnss_binder_client_transact_void(g_gnss.geofence_client,
+	                                 GNSS_GEOFENCING_TX_RESUME, req);
+	return true;
+}
+
 const char *gnss_binder_provider_name(void)
 {
 	return g_gnss.bound ? g_gnss.provider_name : NULL;
@@ -1286,6 +1648,14 @@ void gnss_binder_cleanup(void)
 		gbinder_client_unref(g_gnss.xtra_client);
 		g_gnss.xtra_client = NULL;
 	}
+	if (g_gnss.ni_client) {
+		gbinder_client_unref(g_gnss.ni_client);
+		g_gnss.ni_client = NULL;
+	}
+	if (g_gnss.geofence_client) {
+		gbinder_client_unref(g_gnss.geofence_client);
+		g_gnss.geofence_client = NULL;
+	}
 
 	if (g_gnss.callback_object) {
 		gbinder_local_object_drop(g_gnss.callback_object);
@@ -1303,6 +1673,14 @@ void gnss_binder_cleanup(void)
 		gbinder_local_object_drop(g_gnss.xtra_callback_object);
 		g_gnss.xtra_callback_object = NULL;
 	}
+	if (g_gnss.ni_callback_object) {
+		gbinder_local_object_drop(g_gnss.ni_callback_object);
+		g_gnss.ni_callback_object = NULL;
+	}
+	if (g_gnss.geofence_callback_object) {
+		gbinder_local_object_drop(g_gnss.geofence_callback_object);
+		g_gnss.geofence_callback_object = NULL;
+	}
 
 	if (g_gnss.agnss_remote) {
 		gbinder_remote_object_unref(g_gnss.agnss_remote);
@@ -1315,6 +1693,14 @@ void gnss_binder_cleanup(void)
 	if (g_gnss.xtra_remote) {
 		gbinder_remote_object_unref(g_gnss.xtra_remote);
 		g_gnss.xtra_remote = NULL;
+	}
+	if (g_gnss.ni_remote) {
+		gbinder_remote_object_unref(g_gnss.ni_remote);
+		g_gnss.ni_remote = NULL;
+	}
+	if (g_gnss.geofence_remote) {
+		gbinder_remote_object_unref(g_gnss.geofence_remote);
+		g_gnss.geofence_remote = NULL;
 	}
 
 	if (g_gnss.remote) {
