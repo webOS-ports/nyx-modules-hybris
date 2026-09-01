@@ -77,6 +77,13 @@
 #define AGNSS_IFACE_2_0 "android.hardware.gnss@2.0::IAGnss"
 #define AGNSS_CALLBACK_IFACE_2_0 "android.hardware.gnss@2.0::IAGnssCallback"
 
+/*
+ * IGnssConfiguration's SUPL setters are all declared in @1.0, so - like
+ * IAGnssRil - the object may come from the @2.0 getter but must be addressed
+ * with the @1.0 descriptor.
+ */
+#define GNSS_CONFIG_IFACE_1_0 "android.hardware.gnss@1.0::IGnssConfiguration"
+
 #define GNSS_NI_IFACE_1_0 "android.hardware.gnss@1.0::IGnssNi"
 #define GNSS_NI_CALLBACK_IFACE_1_0 "android.hardware.gnss@1.0::IGnssNiCallback"
 #define GNSS_GEOFENCING_IFACE_1_0 "android.hardware.gnss@1.0::IGnssGeofencing"
@@ -100,6 +107,7 @@ enum gnss_tx {
 	GNSS_TX_GET_EXTENSION_AGNSS = 11,
 	GNSS_TX_GET_EXTENSION_GEOFENCING = 10,
 	GNSS_TX_GET_EXTENSION_NI = 12,
+	GNSS_TX_GET_EXTENSION_CONFIG = 16,
 	GNSS_TX_GET_EXTENSION_XTRA = 15,
 
 	/*
@@ -108,8 +116,29 @@ enum gnss_tx {
 	 * 19..23, and @2.0's own methods therefore start at 24.
 	 */
 	GNSS_TX_GET_EXTENSION_AGNSS_2_0 = 27,
-	GNSS_TX_GET_EXTENSION_AGNSS_RIL_2_0 = 28
+	GNSS_TX_GET_EXTENSION_AGNSS_RIL_2_0 = 28,
+	GNSS_TX_GET_EXTENSION_CONFIG_2_0 = 25
 };
+
+enum gnss_config_tx {
+	GNSS_CONFIG_TX_SET_SUPL_ES = 1,
+	GNSS_CONFIG_TX_SET_SUPL_VERSION = 2,
+	GNSS_CONFIG_TX_SET_SUPL_MODE = 3,
+	GNSS_CONFIG_TX_SET_GPS_LOCK = 4,
+	GNSS_CONFIG_TX_SET_LPP_PROFILE = 5,
+	GNSS_CONFIG_TX_SET_GLONASS_POS_PROTOCOL = 6,
+	GNSS_CONFIG_TX_SET_EMERGENCY_SUPL_PDN = 7
+};
+
+/*
+ * Defaults taken from AOSP's stock gps.conf, which is where the framework gets
+ * them: SUPL 2.0, and both Mobile Station Based and Assisted modes offered so
+ * the HAL can pick. Applied when a SUPL server is configured, because that is
+ * the point at which the caller has said it wants SUPL at all.
+ */
+#define GNSS_SUPL_VERSION_2_0 0x00020000
+#define GNSS_SUPL_MODE_MSB 0x01
+#define GNSS_SUPL_MODE_MSA 0x02
 
 enum agnss_tx {
 	AGNSS_TX_SET_CALLBACK = 1,
@@ -316,6 +345,10 @@ typedef struct {
 	GBinderRemoteObject *geofence_remote;
 	GBinderClient *geofence_client;
 	GBinderLocalObject *geofence_callback_object;
+
+	/* No callback object: IGnssConfiguration is setters only. */
+	GBinderRemoteObject *config_remote;
+	GBinderClient *config_client;
 
 	gulong death_id;
 
@@ -1091,6 +1124,22 @@ static void gnss_binder_setup_extensions(void)
 	                            &g_gnss.geofence_remote, &g_gnss.geofence_client,
 	                            &g_gnss.geofence_callback_object);
 
+	/*
+	 * IGnssConfiguration: SUPL version and mode. Setters only, so there is no
+	 * callback object to register and the shared helper does not fit.
+	 */
+	g_gnss.config_remote = gnss_binder_get_extension(g_gnss.agnss_is_2_0 ?
+	                                                 g_gnss.client_2_0 : g_gnss.client,
+	                                                 g_gnss.agnss_is_2_0 ?
+	                                                 GNSS_TX_GET_EXTENSION_CONFIG_2_0 :
+	                                                 GNSS_TX_GET_EXTENSION_CONFIG,
+	                                                 "IGnssConfiguration");
+	if (g_gnss.config_remote) {
+		gbinder_remote_object_ref(g_gnss.config_remote);
+		g_gnss.config_client = gbinder_client_new(g_gnss.config_remote,
+		                                          GNSS_CONFIG_IFACE_1_0);
+	}
+
 	/* XTRA: predicted ephemeris, the largest cold-start TTFF saving. */
 	gnss_binder_setup_extension(g_gnss.client, GNSS_TX_GET_EXTENSION_XTRA,
 	                            "IGnssXtra", GNSS_XTRA_IFACE_1_0,
@@ -1317,6 +1366,31 @@ bool gnss_binder_agnss_set_server(uint16_t type, const char *hostname, int port)
 
 	if (!g_gnss.agnss_client || !hostname)
 		return false;
+
+	/*
+	 * Configuring a SUPL server is the caller declaring it wants SUPL, so bring
+	 * the SUPL parameters up to something usable at the same time. Without a
+	 * version the HAL is entitled to assume SUPL 1.0, which most carriers no
+	 * longer answer. Failures here are not fatal - the server setting below is
+	 * what actually matters - so they are logged by the transact helper and
+	 * otherwise ignored.
+	 */
+	if (g_gnss.config_client) {
+		GBinderLocalRequest *creq;
+		GBinderWriter cw;
+
+		creq = gbinder_client_new_request(g_gnss.config_client);
+		gbinder_local_request_init_writer(creq, &cw);
+		gbinder_writer_append_int32(&cw, GNSS_SUPL_VERSION_2_0);
+		gnss_binder_client_transact_bool(g_gnss.config_client,
+		                                 GNSS_CONFIG_TX_SET_SUPL_VERSION, creq);
+
+		creq = gbinder_client_new_request(g_gnss.config_client);
+		gbinder_local_request_init_writer(creq, &cw);
+		gbinder_writer_append_int32(&cw, GNSS_SUPL_MODE_MSB | GNSS_SUPL_MODE_MSA);
+		gnss_binder_client_transact_bool(g_gnss.config_client,
+		                                 GNSS_CONFIG_TX_SET_SUPL_MODE, creq);
+	}
 
 	req = gbinder_client_new_request(g_gnss.agnss_client);
 	gbinder_local_request_init_writer(req, &writer);
@@ -1663,6 +1737,10 @@ void gnss_binder_cleanup(void)
 		gbinder_client_unref(g_gnss.geofence_client);
 		g_gnss.geofence_client = NULL;
 	}
+	if (g_gnss.config_client) {
+		gbinder_client_unref(g_gnss.config_client);
+		g_gnss.config_client = NULL;
+	}
 
 	if (g_gnss.callback_object) {
 		gbinder_local_object_drop(g_gnss.callback_object);
@@ -1708,6 +1786,10 @@ void gnss_binder_cleanup(void)
 	if (g_gnss.geofence_remote) {
 		gbinder_remote_object_unref(g_gnss.geofence_remote);
 		g_gnss.geofence_remote = NULL;
+	}
+	if (g_gnss.config_remote) {
+		gbinder_remote_object_unref(g_gnss.config_remote);
+		g_gnss.config_remote = NULL;
 	}
 
 	if (g_gnss.remote) {
