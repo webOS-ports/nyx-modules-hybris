@@ -45,6 +45,7 @@
 
 #include "gnss_binder.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include <gbinder.h>
@@ -64,6 +65,19 @@
 #define GNSS_XTRA_CALLBACK_IFACE_1_0 "android.hardware.gnss@1.0::IGnssXtraCallback"
 
 /*
+ * @2.0 renamed the assistance getters and made the @1.0 ones return a null
+ * binder, so on a 2.x device the A-GPS extensions are only reachable through
+ * these. IAGnss@2.0 is a fresh interface rather than a subclass of @1.0 - same
+ * five methods in the same order, but dataConnOpen gained a leading network
+ * handle - while IAGnssRil@2.0 does extend @1.0, so its inherited codes still
+ * apply and only the interface name changes.
+ */
+#define GNSS_IFACE_2_0 "android.hardware.gnss@2.0::IGnss"
+#define AGNSS_IFACE_2_0 "android.hardware.gnss@2.0::IAGnss"
+#define AGNSS_CALLBACK_IFACE_2_0 "android.hardware.gnss@2.0::IAGnssCallback"
+#define AGNSS_RIL_IFACE_2_0 "android.hardware.gnss@2.0::IAGnssRil"
+
+/*
  * Transaction codes are the 1-based declaration order of the methods in
  * IGnss.hal / IGnssCallback.hal. Verified against
  * hardware/interfaces/gnss/1.0 at android-9.0.0_r61.
@@ -79,7 +93,15 @@ enum gnss_tx {
 	GNSS_TX_SET_POSITION_MODE = 8,
 	GNSS_TX_GET_EXTENSION_AGNSS_RIL = 9,
 	GNSS_TX_GET_EXTENSION_AGNSS = 11,
-	GNSS_TX_GET_EXTENSION_XTRA = 15
+	GNSS_TX_GET_EXTENSION_XTRA = 15,
+
+	/*
+	 * Transaction codes are assigned across the whole inheritance chain in
+	 * declaration order: @1.0 occupies 1..18, @1.1 adds five methods at
+	 * 19..23, and @2.0's own methods therefore start at 24.
+	 */
+	GNSS_TX_GET_EXTENSION_AGNSS_2_0 = 27,
+	GNSS_TX_GET_EXTENSION_AGNSS_RIL_2_0 = 28
 };
 
 enum agnss_tx {
@@ -107,6 +129,14 @@ enum agnss_callback_tx {
 	/* Spelled with the double S in the 1.0 HAL; not a typo here. */
 	AGNSS_CB_TX_STATUS_IPV4 = 1,
 	AGNSS_CB_TX_STATUS_IPV6 = 2
+};
+
+/*
+ * @2.0 collapsed the two address-specific callbacks into one that carries no
+ * address at all, which is all nyx ever used anyway.
+ */
+enum agnss_callback_2_0_tx {
+	AGNSS_CB_2_0_TX_STATUS = 1
 };
 
 enum agnss_ril_callback_tx {
@@ -226,6 +256,12 @@ typedef struct {
 	 */
 	char provider_name[128];
 	gboolean bound;
+
+	/* Major version of the bound IGnss, parsed from the instance name. */
+	int hal_major;
+	/* Only created on a 2.x HAL, purely to reach the renamed getters. */
+	GBinderClient *client_2_0;
+	gboolean agnss_is_2_0;
 
 	gnss_binder_callbacks callbacks;
 	void *user_data;
@@ -513,8 +549,8 @@ static gboolean gnss_binder_client_transact_bool(GBinderClient *client,
 
 	if (status != GBINDER_STATUS_OK)
 		nyx_error(MSGID_NYX_HYBRIS_GPS_TRANSACT_ERR, 0,
-		          "GNSS extension transaction %u failed, binder status %d",
-		          code, status);
+		          "%s transaction %u failed, binder status %d",
+		          gbinder_client_interface(client), code, status);
 
 	return result;
 }
@@ -543,8 +579,8 @@ static void gnss_binder_client_transact_void(GBinderClient *client,
 
 	if (status != GBINDER_STATUS_OK)
 		nyx_error(MSGID_NYX_HYBRIS_GPS_TRANSACT_ERR, 0,
-		          "GNSS extension transaction %u failed, binder status %d",
-		          code, status);
+		          "%s transaction %u failed, binder status %d",
+		          gbinder_client_interface(client), code, status);
 }
 
 /*
@@ -552,18 +588,19 @@ static void gnss_binder_client_transact_void(GBinderClient *client,
  * the extension answers with a null binder rather than an error, so a NULL
  * result here is a normal outcome and not a failure to report.
  */
-static GBinderRemoteObject *gnss_binder_get_extension(guint32 code,
+static GBinderRemoteObject *gnss_binder_get_extension(GBinderClient *client,
+                                                      guint32 code,
                                                       const char *what)
 {
 	GBinderRemoteReply *reply;
 	GBinderRemoteObject *obj = NULL;
 	int status = -1;
 
-	if (!g_gnss.client)
+	if (!client)
 		return NULL;
 
-	reply = gbinder_client_transact_sync_reply(g_gnss.client, code,
-	                                           gbinder_client_new_request(g_gnss.client),
+	reply = gbinder_client_transact_sync_reply(client, code,
+	                                           gbinder_client_new_request(client),
 	                                           &status);
 
 	if (reply) {
@@ -603,6 +640,25 @@ static GBinderLocalReply *gnss_binder_agnss_callback_handler(GBinderLocalObject 
 
 	*status = GBINDER_STATUS_OK;
 	gbinder_remote_request_init_reader(req, &reader);
+
+	if (g_gnss.agnss_is_2_0) {
+		/*
+		 * @2.0::IAGnssCallback has a single agnsssStatusCb(type, status)
+		 * taking two plain enums rather than a struct with an address.
+		 */
+		if (code == AGNSS_CB_2_0_TX_STATUS) {
+			gint32 type = 0;
+			gint32 st = 0;
+
+			if (gbinder_reader_read_int32(&reader, &type) &&
+			    gbinder_reader_read_int32(&reader, &st) &&
+			    g_gnss.callbacks.agnss_status_cb)
+				g_gnss.callbacks.agnss_status_cb((uint16_t) type,
+				                                 (uint16_t) st, 0,
+				                                 g_gnss.user_data);
+		}
+		return NULL;
+	}
 
 	if (code == AGNSS_CB_TX_STATUS_IPV4) {
 		const AGnssStatusIpV4Hidl *st =
@@ -682,15 +738,32 @@ static GBinderLocalReply *gnss_binder_xtra_callback_handler(GBinderLocalObject *
  */
 static void gnss_binder_setup_extensions(void)
 {
+	/*
+	 * On a 2.x HAL the assistance getters live on the @2.0 interface and the
+	 * @1.0 ones are specified to return a null binder, so asking through the
+	 * @1.0 client would silently look like "no A-GPS on this device" - which
+	 * is exactly what it did look like before this was handled.
+	 */
+	if (g_gnss.hal_major >= 2) {
+		g_gnss.client_2_0 = gbinder_client_new(g_gnss.remote, GNSS_IFACE_2_0);
+		g_gnss.agnss_is_2_0 = TRUE;
+	}
+
 	/* A-GNSS (SUPL): server configuration and data-connection handshake. */
-	g_gnss.agnss_remote = gnss_binder_get_extension(GNSS_TX_GET_EXTENSION_AGNSS,
-	                                                "IAGnss");
+	g_gnss.agnss_remote = g_gnss.agnss_is_2_0 ?
+		gnss_binder_get_extension(g_gnss.client_2_0,
+		                          GNSS_TX_GET_EXTENSION_AGNSS_2_0, "IAGnss@2.0") :
+		gnss_binder_get_extension(g_gnss.client,
+		                          GNSS_TX_GET_EXTENSION_AGNSS, "IAGnss");
 	if (g_gnss.agnss_remote) {
 		gbinder_remote_object_ref(g_gnss.agnss_remote);
 		g_gnss.agnss_client = gbinder_client_new(g_gnss.agnss_remote,
-		                                         AGNSS_IFACE_1_0);
+		                                         g_gnss.agnss_is_2_0 ?
+		                                         AGNSS_IFACE_2_0 : AGNSS_IFACE_1_0);
 		g_gnss.agnss_callback_object =
 			gbinder_servicemanager_new_local_object(g_gnss.sm,
+			                                        g_gnss.agnss_is_2_0 ?
+			                                        AGNSS_CALLBACK_IFACE_2_0 :
 			                                        AGNSS_CALLBACK_IFACE_1_0,
 			                                        gnss_binder_agnss_callback_handler,
 			                                        NULL);
@@ -707,11 +780,23 @@ static void gnss_binder_setup_extensions(void)
 	}
 
 	/* A-GNSS RIL: the side that actually benefits from a SIM. */
-	g_gnss.ril_remote = gnss_binder_get_extension(GNSS_TX_GET_EXTENSION_AGNSS_RIL,
-	                                              "IAGnssRil");
+	g_gnss.ril_remote = g_gnss.agnss_is_2_0 ?
+		gnss_binder_get_extension(g_gnss.client_2_0,
+		                          GNSS_TX_GET_EXTENSION_AGNSS_RIL_2_0,
+		                          "IAGnssRil@2.0") :
+		gnss_binder_get_extension(g_gnss.client,
+		                          GNSS_TX_GET_EXTENSION_AGNSS_RIL, "IAGnssRil");
 	if (g_gnss.ril_remote) {
 		gbinder_remote_object_ref(g_gnss.ril_remote);
+		/*
+		 * @2.0::IAGnssRil extends @1.0, so every method this module calls
+		 * keeps its inherited transaction code and only the interface name
+		 * on the wire differs. The callback object stays the @1.0 one for
+		 * the same reason.
+		 */
 		g_gnss.ril_client = gbinder_client_new(g_gnss.ril_remote,
+		                                       g_gnss.agnss_is_2_0 ?
+		                                       AGNSS_RIL_IFACE_2_0 :
 		                                       AGNSS_RIL_IFACE_1_0);
 		g_gnss.ril_callback_object =
 			gbinder_servicemanager_new_local_object(g_gnss.sm,
@@ -731,7 +816,8 @@ static void gnss_binder_setup_extensions(void)
 	}
 
 	/* XTRA: predicted ephemeris, the largest cold-start TTFF saving. */
-	g_gnss.xtra_remote = gnss_binder_get_extension(GNSS_TX_GET_EXTENSION_XTRA,
+	g_gnss.xtra_remote = gnss_binder_get_extension(g_gnss.client,
+	                                               GNSS_TX_GET_EXTENSION_XTRA,
 	                                               "IGnssXtra");
 	if (g_gnss.xtra_remote) {
 		gbinder_remote_object_ref(g_gnss.xtra_remote);
@@ -776,6 +862,19 @@ static gboolean gnss_binder_bind_service(void)
 			g_strlcpy(g_gnss.provider_name, gnss_instances[i],
 			          sizeof(g_gnss.provider_name));
 			g_gnss.bound = TRUE;
+
+			/*
+			 * "android.hardware.gnss@<major>.<minor>::IGnss/default" - the
+			 * major version decides which assistance getters exist, so take
+			 * it from the name that actually answered rather than probing.
+			 */
+			{
+				const char *at = strchr(gnss_instances[i], '@');
+
+				g_gnss.hal_major = at ?
+					(int) strtol(at + 1, NULL, 10) : 1;
+			}
+
 			nyx_info(MSGID_NYX_HYBRIS_GPS_HAL_FOUND, 0,
 			         "Using GNSS HAL %s", gnss_instances[i]);
 			return TRUE;
@@ -980,6 +1079,16 @@ bool gnss_binder_agnss_data_conn_open(const char *apn, int16_t bearer_type)
 
 	req = gbinder_client_new_request(g_gnss.agnss_client);
 	gbinder_local_request_init_writer(req, &writer);
+
+	/*
+	 * @2.0::dataConnOpen takes a leading net_handle_t naming the network to
+	 * use. nyx has no equivalent - it only ever passes an APN - so send
+	 * NETWORK_UNSPECIFIED (0) and let the HAL pick, which is what the handle
+	 * means when the framework has no specific network in mind.
+	 */
+	if (g_gnss.agnss_is_2_0)
+		gbinder_writer_append_int64(&writer, 0);
+
 	gbinder_writer_append_hidl_string(&writer, apn);
 	gbinder_writer_append_int32(&writer, bearer_type);
 
@@ -1157,6 +1266,13 @@ void gnss_binder_cleanup(void)
 		gbinder_client_unref(g_gnss.client);
 		g_gnss.client = NULL;
 	}
+
+	if (g_gnss.client_2_0) {
+		gbinder_client_unref(g_gnss.client_2_0);
+		g_gnss.client_2_0 = NULL;
+	}
+	g_gnss.agnss_is_2_0 = FALSE;
+	g_gnss.hal_major = 0;
 
 	if (g_gnss.agnss_client) {
 		gbinder_client_unref(g_gnss.agnss_client);
