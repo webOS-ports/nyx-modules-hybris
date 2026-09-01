@@ -69,13 +69,13 @@
  * binder, so on a 2.x device the A-GPS extensions are only reachable through
  * these. IAGnss@2.0 is a fresh interface rather than a subclass of @1.0 - same
  * five methods in the same order, but dataConnOpen gained a leading network
- * handle - while IAGnssRil@2.0 does extend @1.0, so its inherited codes still
- * apply and only the interface name changes.
+ * handle - so it gets its own descriptor. IAGnssRil@2.0 does extend @1.0, and
+ * everything used here is inherited, so it keeps the @1.0 descriptor; there is
+ * deliberately no @2.0 name for it below.
  */
 #define GNSS_IFACE_2_0 "android.hardware.gnss@2.0::IGnss"
 #define AGNSS_IFACE_2_0 "android.hardware.gnss@2.0::IAGnss"
 #define AGNSS_CALLBACK_IFACE_2_0 "android.hardware.gnss@2.0::IAGnssCallback"
-#define AGNSS_RIL_IFACE_2_0 "android.hardware.gnss@2.0::IAGnssRil"
 
 #define GNSS_NI_IFACE_1_0 "android.hardware.gnss@1.0::IGnssNi"
 #define GNSS_NI_CALLBACK_IFACE_1_0 "android.hardware.gnss@1.0::IGnssNiCallback"
@@ -1043,17 +1043,24 @@ static void gnss_binder_setup_extensions(void)
 	                            &g_gnss.agnss_callback_object);
 
 	/*
-	 * A-GNSS RIL: the side that actually benefits from a SIM. @2.0::IAGnssRil
-	 * extends @1.0, so every method used here keeps its inherited transaction
-	 * code and only the interface name on the wire differs; the callback stays
-	 * the @1.0 one for the same reason.
+	 * A-GNSS RIL: the side that actually benefits from a SIM.
+	 *
+	 * @2.0::IAGnssRil extends @1.0, and every method this module calls is one
+	 * of the five it inherits. Inherited methods must be addressed with the
+	 * descriptor of the interface that *declared* them, not the derived one:
+	 * the generated server dispatches those codes down to the @1.0 base, whose
+	 * onTransact does enforceInterface(@1.0::IAGnssRil::descriptor). Sending
+	 * @2.0::IAGnssRil there fails that check and the transaction comes back
+	 * BAD_TYPE (0x80000001), which is exactly what MTK returned. The object is
+	 * still the one obtained from getExtensionAGnssRil_2_0; only the name on
+	 * the wire has to be the base. Same rule the IGnss client already follows
+	 * by speaking @1.0 to a @2.1 object.
 	 */
 	gnss_binder_setup_extension(g_gnss.agnss_is_2_0 ? g_gnss.client_2_0 : g_gnss.client,
 	                            g_gnss.agnss_is_2_0 ?
 	                            GNSS_TX_GET_EXTENSION_AGNSS_RIL_2_0 :
 	                            GNSS_TX_GET_EXTENSION_AGNSS_RIL,
 	                            g_gnss.agnss_is_2_0 ? "IAGnssRil@2.0" : "IAGnssRil",
-	                            g_gnss.agnss_is_2_0 ? AGNSS_RIL_IFACE_2_0 :
 	                            AGNSS_RIL_IFACE_1_0,
 	                            AGNSS_RIL_CALLBACK_IFACE_1_0,
 	                            gnss_binder_ril_callback_handler,
