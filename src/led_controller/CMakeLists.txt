@@ -20,4 +20,15 @@ include_directories(.)
 
 webos_build_nyx_module(MicroControllerLEDsDefault 
                        SOURCES led_controller.c
-                       LIBRARIES  ${GLIB2_LDFLAGS} ${PMLOG_LDFLAGS} ${NYXLIB_LDFLAGS} -lhardware)
+                       LIBRARIES  ${GLIB2_LDFLAGS} ${PMLOG_LDFLAGS} ${NYXLIB_LDFLAGS} -lhardware
+                       # This module loads the Android lights HAL through libhybris,
+                       # which pulls Android .so's into their own linker namespace.
+                       # nyx_device_close() dlclose()s the nyx module afterwards, and
+                       # unloading it while that Android-side state still references it
+                       # segfaults - every close on the LED controller died this way on
+                       # tissot, after the light had already been set. -z nodelete makes
+                       # the dlclose a no-op for this module, which costs one mapping and
+                       # is the usual remedy for a library that cannot be safely unloaded.
+                       # The native modules do not need it: they load no Android code and
+                       # close cleanly.
+                       -Wl,-z,nodelete)

@@ -105,7 +105,15 @@ static int light_device_open(const struct hw_module_t* module, const char *id,
 
 static void light_device_close(const struct light_device_t *device)
 {
-    device->common.close((struct hw_device_t*) device);
+    /*
+     * common.close is supplied by the vendor blob, and the legacy lights HAL
+     * never required it to be set. Calling it unconditionally faults wherever it
+     * is NULL.
+     */
+    if (device->common.close)
+    {
+        device->common.close((struct hw_device_t *) device);
+    }
 }
 
 static bool hybris_module_lights_load(void)
