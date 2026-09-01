@@ -102,3 +102,9 @@ endif()
 if(NOT NYXMOD_OW_HAPTICS)
 	add_subdirectory(haptics)
 endif()
+
+# GPS over the Android GNSS HAL. Machines that drive a serial NMEA receiver
+# instead (PinePhone) set NYXMOD_OW_GPS TRUE and get nyx-modules' own module.
+if(NOT NYXMOD_OW_GPS)
+	add_subdirectory(gps)
+endif()

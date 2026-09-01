@@ -34,7 +34,7 @@ pkg_check_modules(PMLOG REQUIRED PmLogLib)
 include_directories(${PMLOG_INCLUDE_DIRS})
 webos_add_compiler_flags(ALL ${PMLOG_CFLAGS_OTHER})
 
-webos_nyx_module_provider(HYBRIS DEVICEINFO HAPTICS LEDCONTROLLER SYSTEM)
+webos_nyx_module_provider(HYBRIS DEVICEINFO HAPTICS LEDCONTROLLER SYSTEM GPS)
 webos_test_provider(GLIB_TEST)
 webos_include_install_paths()
 
