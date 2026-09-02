@@ -103,6 +103,11 @@ if(NOT NYXMOD_OW_HAPTICS)
 	add_subdirectory(haptics)
 endif()
 
+# GPS over the Android GNSS HAL. Machines that drive a serial NMEA receiver
+# instead (PinePhone) set NYXMOD_OW_GPS TRUE and get nyx-modules' own module.
+if(NOT NYXMOD_OW_GPS)
+	add_subdirectory(gps)
+
 # The torch. NYXMOD_OW_LEDTORCH TRUE means the native sysfs module in
 # nyx-modules owns it; FALSE brings us here, to the camera-service route, which
 # is the one that works where /sys/class/leds belongs to the Android side.
@@ -122,4 +127,5 @@ endif()
 if(NOT NYXMOD_OW_LEDTORCH)
 	pkg_check_modules(DROIDMEDIA REQUIRED droidmedia)
 	add_subdirectory(led_torch)
+
 endif()
