@@ -460,6 +460,13 @@ typedef struct {
 	char provider_name[128];
 	gboolean bound;
 
+	/*
+	 * The HAL dropped off the bus. Set from the death handler, which runs on
+	 * the binder event thread, so it only records the fact; the teardown and
+	 * the rebind happen on the next init() from the caller's own thread.
+	 */
+	gboolean hal_died;
+
 	/* Major version of the bound IGnss, parsed from the instance name. */
 	int hal_major;
 	/* Only created on a 2.x HAL, purely to reach the renamed getters. */
@@ -707,10 +714,15 @@ static void gnss_binder_death_handler(GBinderRemoteObject *obj, void *user_data)
 	(void) user_data;
 
 	/*
-	 * The HAL died. Drop our side so a later start() reports failure
-	 * cleanly instead of transacting on a dead object; recovery means a
-	 * fresh nyx_gps_init, which is the location service's call to make.
+	 * This runs on the binder event thread, so record the death rather than
+	 * tearing the binding down here - cleanup() unrefs the very objects this
+	 * callback arrived through. The next init() sees the flag and rebinds,
+	 * instead of handing back the dead client the way it used to: init()
+	 * returned true on a stale binding and every later call silently did
+	 * nothing.
 	 */
+	g_gnss.hal_died = TRUE;
+
 	nyx_error(MSGID_NYX_HYBRIS_GPS_HAL_DIED, 0, "GNSS HAL died");
 }
 
@@ -1381,17 +1393,57 @@ static gboolean gnss_binder_bind_service(void)
 	return FALSE;
 }
 
-bool gnss_binder_init(const gnss_binder_callbacks *callbacks, void *user_data)
+/*
+ * setCallback is not the one-time handshake it looks like. On MediaTek the HAL
+ * passes our callback down to mnld, and mnld exits at the end of every session;
+ * whatever brings it back comes back holding nothing. The HAL then goes on
+ * producing NMEA with nobody to hand it to and reports no error at all - the
+ * subscriber simply gets silence, which is a great deal harder to diagnose than
+ * a failure would have been. Re-registering costs one transaction per start,
+ * and is what a freshly launched location service does anyway: that was the
+ * only configuration in which any of this ever worked.
+ */
+static gboolean gnss_binder_register_callback(void)
 {
 	GBinderLocalRequest *req;
 
+	if (!g_gnss.client || !g_gnss.callback_object)
+		return FALSE;
+
+	req = gbinder_client_new_request(g_gnss.client);
+	gbinder_local_request_append_local_object(req, g_gnss.callback_object);
+
+	return gnss_binder_transact_bool(GNSS_TX_SET_CALLBACK, req);
+}
+
+bool gnss_binder_init(const gnss_binder_callbacks *callbacks, void *user_data)
+{
 	if (!callbacks)
 		return false;
 
+	/*
+	 * A binding whose HAL has since died is worse than no binding at all:
+	 * every transaction on it fails, yet the early return below would still
+	 * report success. Tear it down and bind again from scratch.
+	 */
+	if (g_gnss.hal_died)
+		gnss_binder_cleanup();
+
 	if (g_gnss.client) {
-		/* Already bound; just re-point the callbacks. */
+		/*
+		 * Already bound, so re-point the callbacks - but also make sure
+		 * the HAL still holds ours, because re-pointing function
+		 * pointers on our side means nothing if the HAL has forgotten
+		 * where it is meant to send anything.
+		 */
 		g_gnss.callbacks = *callbacks;
 		g_gnss.user_data = user_data;
+
+		if (!gnss_binder_register_callback())
+			nyx_warn(MSGID_NYX_HYBRIS_GPS_SET_CALLBACK_ERR, 0,
+			         "Could not re-register the GNSS callback with %s",
+			         g_gnss.provider_name);
+
 		return true;
 	}
 
@@ -1439,10 +1491,7 @@ bool gnss_binder_init(const gnss_binder_callbacks *callbacks, void *user_data)
 		return false;
 	}
 
-	req = gbinder_client_new_request(g_gnss.client);
-	gbinder_local_request_append_local_object(req, g_gnss.callback_object);
-
-	if (!gnss_binder_transact_bool(GNSS_TX_SET_CALLBACK, req)) {
+	if (!gnss_binder_register_callback()) {
 		nyx_error(MSGID_NYX_HYBRIS_GPS_SET_CALLBACK_ERR, 0,
 		          "GNSS setCallback was rejected by %s", g_gnss.provider_name);
 		gnss_binder_cleanup();
@@ -1463,6 +1512,25 @@ bool gnss_binder_start(void)
 {
 	if (!g_gnss.client)
 		return false;
+
+	/*
+	 * Unconditionally, not just when a stop invalidated it. The failure this
+	 * fixes had no stop in it at all: the service initialised the HAL at
+	 * boot and started GPS 73s later, by which point the HAL was no longer
+	 * holding the callback that init had handed it. Tracking our own stops
+	 * cannot see that happen.
+	 *
+	 * Registering immediately before start is exactly the sequence a freshly
+	 * launched location service produces, which is the only one that has
+	 * ever worked on either device - so this makes every session look like
+	 * the good case rather than inventing a new one. A rejection is not
+	 * fatal: a HAL that refuses a second setCallback is one that is still
+	 * holding the first.
+	 */
+	if (!gnss_binder_register_callback())
+		nyx_warn(MSGID_NYX_HYBRIS_GPS_SET_CALLBACK_ERR, 0,
+		         "Could not re-register the GNSS callback with %s before start",
+		         g_gnss.provider_name);
 
 	return gnss_binder_transact_bool(GNSS_TX_START,
 	                                 gbinder_client_new_request(g_gnss.client));
@@ -1980,6 +2048,7 @@ void gnss_binder_cleanup(void)
 	memset(&g_gnss.callbacks, 0, sizeof(g_gnss.callbacks));
 	g_gnss.user_data = NULL;
 	g_gnss.bound = FALSE;
+	g_gnss.hal_died = FALSE;
 
 	if (g_gnss.client) {
 		gnss_binder_transact_oneway(GNSS_TX_CLEANUP,
