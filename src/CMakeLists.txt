@@ -102,3 +102,24 @@ endif()
 if(NOT NYXMOD_OW_HAPTICS)
 	add_subdirectory(haptics)
 endif()
+
+# The torch. NYXMOD_OW_LEDTORCH TRUE means the native sysfs module in
+# nyx-modules owns it; FALSE brings us here, to the camera-service route, which
+# is the one that works where /sys/class/leds belongs to the Android side.
+# Default it the same way nyx-modules does, and for the same reason: these
+# NYXMOD_OW_* flags say which side owns a module, and every other one is set
+# explicitly by the machine cmake. This one is not, because sysfs is the right
+# torch backend for every native device and only a halium machine needs to say
+# otherwise - so leaving it undefined has to mean "the native side owns it".
+#
+# Without this default, undefined made NOT(undefined) true here while
+# nyx-modules defaulted it TRUE and built the torch as well: both packages then
+# shipped nyxLedTorch.module and collided on install.
+if(NOT DEFINED NYXMOD_OW_LEDTORCH)
+	set(NYXMOD_OW_LEDTORCH TRUE)
+endif()
+
+if(NOT NYXMOD_OW_LEDTORCH)
+	pkg_check_modules(DROIDMEDIA REQUIRED droidmedia)
+	add_subdirectory(led_torch)
+endif()
