@@ -107,6 +107,7 @@ endif()
 # instead (PinePhone) set NYXMOD_OW_GPS TRUE and get nyx-modules' own module.
 if(NOT NYXMOD_OW_GPS)
 	add_subdirectory(gps)
+endif()
 
 # The torch. NYXMOD_OW_LEDTORCH TRUE means the native sysfs module in
 # nyx-modules owns it; FALSE brings us here, to the camera-service route, which
@@ -127,5 +128,4 @@ endif()
 if(NOT NYXMOD_OW_LEDTORCH)
 	pkg_check_modules(DROIDMEDIA REQUIRED droidmedia)
 	add_subdirectory(led_torch)
-
 endif()
