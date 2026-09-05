@@ -24,6 +24,7 @@
 #include <net/if.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <unistd.h>
 #include <openssl/sha.h>
 #include <nyx/nyx_module.h>
 #include <nyx/module/nyx_utils.h>
@@ -49,10 +50,6 @@ nyx_error_t device_info_query(nyx_device_handle_t device,
 	struct device_info *dinfo;
 	nyx_error_t error = NYX_ERROR_NONE;
 	char value[PROP_VALUE_MAX];
-	unsigned char hash[SHA_DIGEST_LENGTH];
-	char *p;
-	int n, fd, sock;
-	struct ifreq req;
 
 	if (device == NULL)
 		return NYX_ERROR_INVALID_VALUE;
@@ -93,6 +90,9 @@ nyx_error_t device_info_query(nyx_device_handle_t device,
 
 	case NYX_DEVICE_INFO_BT_ADDR:
 		if (dinfo->bt_mac_address == NULL) {
+			int fd;
+			ssize_t bytes;
+
 			property_get("ro.bt.bdaddr_path", value, "");
 			if (strlen(value) == 0) {
 				/* property doesn't exist or isn't filled so we will never get more
@@ -107,9 +107,24 @@ nyx_error_t device_info_query(nyx_device_handle_t device,
 				break;
 			}
 
-			dinfo->bt_mac_address = (char*) malloc(sizeof(char) * (MAC_ADDRESS_NUM_OCTETS * 3));
-			read(fd, dinfo->bt_mac_address, (MAC_ADDRESS_NUM_OCTETS * 3));
+			dinfo->bt_mac_address = (char*) malloc((size_t) MAC_ADDRESS_NUM_OCTETS * 3);
+			if (dinfo->bt_mac_address == NULL) {
+				close(fd);
+				error = NYX_ERROR_OUT_OF_MEMORY;
+				break;
+			}
+
+			bytes = read(fd, dinfo->bt_mac_address, (MAC_ADDRESS_NUM_OCTETS * 3) - 1);
 			close(fd);
+			if (bytes <= 0) {
+				free(dinfo->bt_mac_address);
+				dinfo->bt_mac_address = NULL;
+				error = NYX_ERROR_INVALID_OPERATION;
+				break;
+			}
+
+			dinfo->bt_mac_address[bytes] = '\0';
+			g_strchomp(dinfo->bt_mac_address);
 		}
 
 		*dest = dinfo->bt_mac_address;
@@ -132,6 +147,10 @@ nyx_error_t device_info_query(nyx_device_handle_t device,
 
 	case NYX_DEVICE_INFO_WIFI_ADDR:
 		if (dinfo->wifi_mac_address == NULL) {
+			struct ifreq req;
+			int n, sock;
+
+			memset(&req, 0, sizeof(req));
 			property_get("wifi.interface", value, "");
 			if (strlen(value) == 0) {
 				/* property doesn't exist or isn't filled so we will never get more
@@ -141,21 +160,27 @@ nyx_error_t device_info_query(nyx_device_handle_t device,
 			}
 
 			sock = socket(AF_INET, SOCK_DGRAM, 0);
-			if (socket < 0) {
+			if (sock < 0) {
 				error = NYX_ERROR_INVALID_OPERATION;
 				break;
 			}
 
-			strncpy(req.ifr_name, value, IFNAMSIZ);
+			g_strlcpy(req.ifr_name, value, IFNAMSIZ);
 			if (ioctl(sock, SIOCGIFHWADDR, &req) < 0) {
 				close(sock);
 				error = NYX_ERROR_INVALID_OPERATION;
 				break;
 			}
 
-			dinfo->wifi_mac_address = (char*) malloc(sizeof(char) * 32);
+			dinfo->wifi_mac_address = (char*) malloc(32);
+			if (dinfo->wifi_mac_address == NULL) {
+				close(sock);
+				error = NYX_ERROR_OUT_OF_MEMORY;
+				break;
+			}
+
 			for (n = 0; n < MAC_ADDRESS_NUM_OCTETS; n++) {
-				sprintf(&dinfo->wifi_mac_address[n * 3], "%02X%s",
+				g_snprintf(&dinfo->wifi_mac_address[(size_t) n * 3], 4, "%02X%s",
 						 (unsigned char) req.ifr_hwaddr.sa_data[n],
 						 (n < (MAC_ADDRESS_NUM_OCTETS - 1)) ? ":" : "");
 			}
@@ -183,16 +208,24 @@ nyx_error_t device_info_query(nyx_device_handle_t device,
 
 	case NYX_DEVICE_INFO_NDUID:
 		if (dinfo->nduid == NULL) {
+			unsigned char hash[SHA_DIGEST_LENGTH];
+			char *p;
+			int n;
+
 			property_get("ro.serialno", value, "");
 			if (strlen(value) == 0) {
 				error = NYX_ERROR_INVALID_OPERATION;
 				break;
 			}
 			SHA1((unsigned char*) value, strlen(value), hash);
-			dinfo->nduid = (char*) malloc(sizeof(char) * (SHA_DIGEST_LENGTH * 2 + 1));
+			dinfo->nduid = (char*) malloc(SHA_DIGEST_LENGTH * 2 + 1);
+			if (dinfo->nduid == NULL) {
+				error = NYX_ERROR_OUT_OF_MEMORY;
+				break;
+			}
 			p = dinfo->nduid;
 			for (n = 0; n < SHA_DIGEST_LENGTH; n++) {
-				snprintf(p, 3, "%02x", hash[n]);
+				g_snprintf(p, 3, "%02x", hash[n]);
 				p += 2;
 			}
 			*p = '\0';
@@ -234,12 +267,12 @@ nyx_error_t device_info_get_info(nyx_device_handle_t device, nyx_device_info_typ
 nyx_error_t nyx_module_open(nyx_instance_t instance, nyx_device_t **device)
 {
 	struct device_info *dinfo;
-	nyx_error_t error = NYX_ERROR_NONE;
+	nyx_error_t error;
 
 	if (device == NULL)
 		return NYX_ERROR_INVALID_VALUE;
 
-	dinfo = (struct device_info*) calloc(sizeof(struct device_info), 1);
+	dinfo = (struct device_info*) calloc(1, sizeof(struct device_info));
 	if (dinfo == NULL) {
 		error = NYX_ERROR_OUT_OF_MEMORY;
 		goto error;

@@ -40,13 +40,12 @@
 #include <nyx/module/nyx_utils.h>
 #include "msgid.h"
 
-nyx_device_t *nyxDev;
-nyx_device_callback_function_t alarm_fired_callback = NULL;
-bool reformatted = false;
+static nyx_device_t *nyxDev;
+static nyx_device_callback_function_t alarm_fired_callback = NULL;
 
 NYX_DECLARE_MODULE(NYX_DEVICE_SYSTEM, "System");
 
-void AlarmFiredCB(void)
+static void AlarmFiredCB(void)
 {
 	if (alarm_fired_callback)
 	{
@@ -62,7 +61,7 @@ nyx_error_t nyx_module_open(nyx_instance_t i, nyx_device_t **d)
 		return NYX_ERROR_NONE;
 	}
 
-	nyxDev = (nyx_device_t *)calloc(sizeof(nyx_device_t), 1);
+	nyxDev = (nyx_device_t *)calloc(1, sizeof(nyx_device_t));
 
 	if (NULL == nyxDev)
 	{
@@ -164,7 +163,7 @@ nyx_error_t system_query_next_alarm(nyx_device_handle_t handle, time_t *time)
 		return NYX_ERROR_INVALID_OPERATION;
 	}
 
-	if (rtc_read_alarm_time(time) < 0)
+	if (!rtc_read_alarm_time(time))
 	{
 		return NYX_ERROR_INVALID_OPERATION;
 	}

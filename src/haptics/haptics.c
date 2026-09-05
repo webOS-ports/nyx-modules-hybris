@@ -23,6 +23,14 @@
 #include <android/hardware_legacy/vibrator.h>
 #else
 #include <android/hardware/vibrator.h>
+/*
+ * The legacy vibrator interface used below is not declared by the newer
+ * vibrator HAL header; the symbols still come from libhardware_legacy at
+ * link time.
+ */
+int vibrator_exists(void);
+int vibrator_on(int timeout_ms);
+int vibrator_off(void);
 #endif
 
 #include <glib.h>
@@ -35,11 +43,11 @@
 
 #define VIBRATOR_PAUSE 25 //ms
 
-gboolean vibrate_cb (gpointer user_data);
-void vibrate_stop_timeout();
+static gboolean vibrate_cb (gpointer user_data);
+static void vibrate_stop_timeout(void);
 
-nyx_haptics_device_t *nyxDev = NULL;
-nyx_haptics_configuration_t *nyxConf = NULL;
+static nyx_haptics_device_t *nyxDev = NULL;
+static nyx_haptics_configuration_t *nyxConf = NULL;
 
 NYX_DECLARE_MODULE(NYX_DEVICE_HAPTICS, "Haptics")
 
@@ -47,8 +55,7 @@ nyx_error_t nyx_module_open (nyx_instance_t instance, nyx_device_t** device_ptr)
 {
 #if (ANDROID_VERSION_MAJOR >= 9)
 	return NYX_ERROR_DEVICE_NOT_EXIST;
-#endif
-
+#else
 	if (!vibrator_exists())
 		return NYX_ERROR_DEVICE_NOT_EXIST;
 
@@ -58,12 +65,15 @@ nyx_error_t nyx_module_open (nyx_instance_t instance, nyx_device_t** device_ptr)
 		return NYX_ERROR_NONE;
 	}
 
-	nyxDev = (nyx_haptics_device_t*)calloc(sizeof(nyx_haptics_device_t), 1);
+	nyxDev = (nyx_haptics_device_t*)calloc(1, sizeof(nyx_haptics_device_t));
 	if (NULL == nyxDev)
 		return NYX_ERROR_OUT_OF_MEMORY;
-	nyxConf = (nyx_haptics_configuration_t*)calloc(sizeof(nyx_haptics_configuration_t), 1);
-	if (NULL == nyxConf)
+	nyxConf = (nyx_haptics_configuration_t*)calloc(1, sizeof(nyx_haptics_configuration_t));
+	if (NULL == nyxConf) {
+		free(nyxDev);
+		nyxDev = NULL;
 		return NYX_ERROR_OUT_OF_MEMORY;
+	}
 
 	nyx_module_register_method(instance, (nyx_device_t*) nyxDev,
 		NYX_HAPTICS_VIBRATE_MODULE_METHOD, "vibrate");
@@ -75,6 +85,7 @@ nyx_error_t nyx_module_open (nyx_instance_t instance, nyx_device_t** device_ptr)
 	*device_ptr = (nyx_device_t*)nyxDev;
 
 	return NYX_ERROR_NONE;
+#endif
 }
 
 nyx_error_t nyx_module_close (nyx_device_t* device) {
@@ -82,6 +93,8 @@ nyx_error_t nyx_module_close (nyx_device_t* device) {
 	vibrator_off();
 	free(nyxDev);
 	free(nyxConf);
+	nyxDev = NULL;
+	nyxConf = NULL;
 	return NYX_ERROR_NONE;
 }
 
@@ -101,7 +114,7 @@ nyx_error_t vibrate (nyx_device_handle_t handle, nyx_haptics_configuration_t con
 
 	if (nyxConf->period > VIBRATOR_PAUSE) {
 		vibrator_on(nyxConf->period - VIBRATOR_PAUSE);
-		nyxDev->haptic_effect_id = g_timeout_add (nyxConf->period, (GSourceFunc) vibrate_cb, NULL);
+		nyxDev->haptic_effect_id = (int32_t) g_timeout_add (nyxConf->period, (GSourceFunc) vibrate_cb, NULL);
 	}
 
 	return NYX_ERROR_NONE;
@@ -119,7 +132,7 @@ nyx_error_t cancel_all (nyx_device_handle_t handle) {
 	return NYX_ERROR_NONE;
 }
 
-gboolean vibrate_cb (gpointer user_data) {
+static gboolean vibrate_cb (gpointer user_data) {
 	nyxConf->duration -= nyxConf->period;
 	if (nyxConf->duration <= 0) {
 		nyxDev->haptic_effect_id = 0;
@@ -130,7 +143,7 @@ gboolean vibrate_cb (gpointer user_data) {
 	return true;
 }
 
-void vibrate_stop_timeout() {
+static void vibrate_stop_timeout(void) {
 	if (nyxDev->haptic_effect_id > 0) {
 		g_source_remove(nyxDev->haptic_effect_id);
 		nyxDev->haptic_effect_id = 0;

@@ -30,22 +30,22 @@
 
 typedef void (*RtcAlarmFunc)(void);
 
-bool rtc_open();
-void rtc_close();
+bool rtc_open(void);
+void rtc_close(void);
 bool rtc_add_watch(RtcAlarmFunc func);
 bool rtc_clear_watch(void);
-bool rtc_wait_alarm();
-bool rtc_check_alarm();
+bool rtc_wait_alarm(void);
+bool rtc_check_alarm(void);
 bool rtc_alarm_expired(void);
-int32_t rtc_getfd();
+int32_t rtc_getfd(void);
 bool rtc_set_alarm_diff(time_t diff);
 bool rtc_set_alarm(struct rtc_wkalrm *alarm);
 bool rtc_set_alarm_time(time_t expiry);
-bool rtc_clear_alarm();
+bool rtc_clear_alarm(void);
 bool rtc_read_alarm(struct rtc_wkalrm *alarm);
 bool rtc_read_alarm_time(time_t *time);
 time_t rtc_time(time_t *time);
-bool rtc_read(struct tm *rtc_tm);
+bool rtc_read(struct tm *tm_time);
 bool rtc_write(struct tm *tm_time);
 bool wall_rtc_diff(time_t *ret_delta);
 

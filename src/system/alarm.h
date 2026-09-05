@@ -27,8 +27,8 @@
 
 #include <time.h>
 
-bool android_alarm_open();
-void android_alarm_close();
+bool android_alarm_open(void);
+void android_alarm_close(void);
 bool android_alarm_set(time_t expiry);
 bool android_alarm_clear();
 bool android_alarm_read(struct tm *tm_time);

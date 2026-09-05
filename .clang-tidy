@@ -1,0 +1,26 @@
+# Checks disabled beyond the noisy defaults, with the reason they don't apply here:
+#  - misc-unused-parameters: nyx module methods are resolved via dlsym and must
+#    keep the exact signature nyx-lib expects, unused parameters included.
+#  - cert-env33-c / concurrency-mt-unsafe: system() is called with fixed strings
+#    ("reboot", "halt -f", ...) from a single-threaded service; that is the
+#    intended mechanism for shutdown/reboot here.
+#  - bugprone-assignment-in-if-condition: the gbinder reader idiom in
+#    gnss_binder.c assigns inside a parenthesised && chain on purpose.
+#  - clang-analyzer-optin.core.EnumCastOutOfRange: fires on OR-ing GIOCondition
+#    flags for g_io_add_watch, which is the documented GLib usage.
+Checks: >
+  bugprone-*,
+  cert-*,
+  concurrency-*,
+  performance-*,
+  portability-*,
+  misc-*,
+  clang-analyzer-*,
+  -misc-include-cleaner,
+  -misc-no-recursion,
+  -misc-unused-parameters,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-assignment-in-if-condition,
+  -cert-env33-c,
+  -concurrency-mt-unsafe,
+  -clang-analyzer-optin.core.EnumCastOutOfRange

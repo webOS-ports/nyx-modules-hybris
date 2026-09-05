@@ -31,13 +31,13 @@
 
 #include "resume_handler.h"
 
-static int input_source_fd = 0;
+static int input_source_fd = -1;
 static GIOChannel *channel = NULL;
-static int readwatch = 0;
+static guint readwatch = 0;
 
-gboolean _handle_input_event(GIOChannel *channel, GIOCondition condition, gpointer data)
+static gboolean handle_input_event(GIOChannel *source, GIOCondition condition, gpointer data)
 {
-	int bytesread;
+	ssize_t bytesread;
 	int wakeup = 0;
 	struct input_event ev;
 
@@ -50,7 +50,7 @@ gboolean _handle_input_event(GIOChannel *channel, GIOCondition condition, gpoint
 	libsuspend_acquire_wake_lock("wakelockd_handle_input_event");
 
 	bytesread = read(input_source_fd, &ev, sizeof(struct input_event));
-	if (bytesread == 0) {
+	if (bytesread <= 0) {
 		g_warning("Got some input event but could not read anything -> waking up the system!");
 		wakeup = 1;
 	}
@@ -73,7 +73,6 @@ gboolean _handle_input_event(GIOChannel *channel, GIOCondition condition, gpoint
 int power_key_resume_handler_init(void)
 {
 	const char *node_path;
-    char *full_path;
 	GDir *input_dir;
 	int rc = 1;
 	struct libevdev *dev = NULL;
@@ -87,10 +86,12 @@ int power_key_resume_handler_init(void)
 	}
 
 	while ((node_path = g_dir_read_name(input_dir)) != NULL) {
-		full_path = g_strdup_printf("/dev/input/%s", node_path);
+		char *full_path = g_strdup_printf("/dev/input/%s", node_path);
 
-		if (g_file_test(node_path, G_FILE_TEST_IS_DIR))
+		if (g_file_test(full_path, G_FILE_TEST_IS_DIR)) {
+			g_free(full_path);
 			continue;
+		}
 
 		g_message("Opening %s", full_path);
 
@@ -102,7 +103,7 @@ int power_key_resume_handler_init(void)
 
 		rc = libevdev_new_from_fd(input_source_fd, &dev);
 		if (rc < 0) {
-			fprintf(stderr, "Failed to init libevdev (%s)\n", strerror(-rc));
+			g_warning("Failed to init libevdev (%s)", g_strerror(-rc));
 			close(input_source_fd);
 			input_source_fd = -1;
 			continue;
@@ -123,7 +124,7 @@ int power_key_resume_handler_init(void)
 
 	channel = g_io_channel_unix_new(input_source_fd);
 	g_io_channel_set_encoding(channel, NULL, NULL);
-	readwatch = g_io_add_watch(channel, G_IO_IN | G_IO_HUP | G_IO_NVAL, _handle_input_event, NULL);
+	readwatch = g_io_add_watch(channel, G_IO_IN | G_IO_HUP | G_IO_NVAL, handle_input_event, NULL);
 
 	return 0;
 }
@@ -136,7 +137,7 @@ void power_key_resume_handler_release(void)
 	if (channel != NULL)
 		g_io_channel_unref(channel);
 
-	if (input_source_fd > 0)
+	if (input_source_fd >= 0)
 		close(input_source_fd);
 }
 

@@ -18,6 +18,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <glib.h>
 /*
@@ -60,26 +61,36 @@ NYX_DECLARE_MODULE(NYX_DEVICE_LED_CONTROLLER, "LedControllers");
 #define BACKLIGHT_MAX_SYSFS_PATH "/sys/class/leds/lcd-backlight/max_brightness"
 #endif
 
-static const struct hw_module_t *lights_module = 0;
-static struct light_device_t *backlight_device = 0;
-static struct light_device_t *notifications_device = 0;
+static const struct hw_module_t *lights_module = NULL;
+static struct light_device_t *backlight_device = NULL;
+static struct light_device_t *notifications_device = NULL;
 
 static bool use_sysfs_backlight = false;
 static int sysfs_backlight_max = 255;
 
 static int sysfs_read_int(const char *path, int fallback)
 {
+    char buf[32];
+    char *end = NULL;
+    long value;
     FILE *f = fopen(path, "r");
-    int value = fallback;
 
     if (!f)
         return fallback;
 
-    if (fscanf(f, "%d", &value) != 1)
-        value = fallback;
+    if (fgets(buf, sizeof(buf), f) == NULL)
+    {
+        (void) fclose(f);
+        return fallback;
+    }
 
-    fclose(f);
-    return value;
+    (void) fclose(f);
+
+    value = strtol(buf, &end, 10);
+    if (end == buf || value < INT_MIN || value > INT_MAX)
+        return fallback;
+
+    return (int) value;
 }
 
 static bool sysfs_backlight_available(void)
@@ -89,7 +100,7 @@ static bool sysfs_backlight_available(void)
     if (!f)
         return false;
 
-    fclose(f);
+    (void) fclose(f);
     return true;
 }
 
@@ -107,8 +118,21 @@ static bool sysfs_backlight_set(int level)
         return false;
     }
 
-    fprintf(f, "%d", value);
-    fclose(f);
+    if (fprintf(f, "%d", value) < 0)
+    {
+        nyx_error(MSGID_NYX_HYBRIS_LED_BRIGHTNESS_LEV_ERR, 0,
+                  "Failed to write %s for backlight (level %i)", BACKLIGHT_SYSFS_PATH, level);
+        (void) fclose(f);
+        return false;
+    }
+
+    if (fclose(f) != 0)
+    {
+        nyx_error(MSGID_NYX_HYBRIS_LED_BRIGHTNESS_LEV_ERR, 0,
+                  "Failed to write %s for backlight (level %i)", BACKLIGHT_SYSFS_PATH, level);
+        return false;
+    }
+
     return true;
 }
 
@@ -146,7 +170,7 @@ static bool hybris_module_lights_load(void)
             nyx_error(MSGID_NYX_HYBRIS_LED_ANDROID_LIGHT_MOD_ERR , 0, "Could not load android hardware lights module");
     }
 
-    return lights_module != 0;
+    return lights_module != NULL;
 }
 
 static struct light_device_t* hybris_light_init(const char *id)
@@ -154,24 +178,23 @@ static struct light_device_t* hybris_light_init(const char *id)
     struct light_device_t *device = NULL ;
 
     if (!hybris_module_lights_load())
-        return false;
+        return NULL;
 
     light_device_open(lights_module, id, &device);
     if (!device) {
         nyx_error(MSGID_NYX_HYBRIS_LED_ANDROID_LIGHT_DEV_ERR, 0, "Failed to open light device (id %s)", id);
-        return false;
+        return NULL;
     }
 
     return device;
 }
 
-static void hybris_light_release(struct light_device_t *device)
+static void hybris_light_release(const struct light_device_t *device)
 {
     if (!device)
         return;
 
     light_device_close(device);
-    device = 0;
 }
 
 static bool hybris_light_set_brightness(struct light_device_t *device, int level)
@@ -232,7 +255,7 @@ static bool hybris_light_set_pattern(struct light_device_t *device, int r, int g
 
 nyx_error_t nyx_module_open (nyx_instance_t i, nyx_device_t** d)
 {
-    nyx_device_t *nyxDev = (nyx_device_t*)calloc(sizeof(nyx_device_t), 1);
+    nyx_device_t *nyxDev = (nyx_device_t*)calloc(1, sizeof(nyx_device_t));
     if (NULL == nyxDev)
         return NYX_ERROR_OUT_OF_MEMORY;
 
@@ -289,10 +312,10 @@ nyx_error_t nyx_module_close (nyx_device_t* d)
     free(d);
 
     hybris_light_release(notifications_device);
-    notifications_device = 0;
+    notifications_device = NULL;
 
     hybris_light_release(backlight_device);
-    backlight_device = 0;
+    backlight_device = NULL;
 
     return NYX_ERROR_NONE;
 }
@@ -300,7 +323,7 @@ nyx_error_t nyx_module_close (nyx_device_t* d)
 static nyx_error_t handle_backlight_effect(nyx_device_handle_t handle, nyx_led_controller_effect_t effect)
 {
     nyx_callback_status_t status = NYX_CALLBACK_STATUS_DONE;
-    unsigned int brightness = 0;
+    int32_t brightness = 0;
 
     switch(effect.required.effect)
     {
@@ -419,7 +442,7 @@ static nyx_error_t handle_notification_effect(nyx_device_handle_t handle, nyx_le
 {
     nyx_error_t err = NYX_ERROR_NONE; 
     bool hybris_err = true ;
-    unsigned int led_on = 0 , led_off = 0 , brightness = 0 ;
+    int32_t led_on = 0 , led_off = 0 , brightness = 0 ;
     int red = 0 , green = 0 , blue = 0 ;
 
     /* Sanity Check input params */
@@ -442,7 +465,7 @@ static nyx_error_t handle_notification_effect(nyx_device_handle_t handle, nyx_le
         case NYX_LED_CONTROLLER_EFFECT_LED_SET:
             err = nyx_led_controller_core_configuration_get_param( effect.core_configuration 
                                                                    , NYX_LED_CONTROLLER_CORE_EFFECT_BRIGHTNESS
-                                                                   , (int32_t *)&brightness);
+                                                                   , &brightness);
             if( err != NYX_ERROR_NONE )
             {
                 nyx_debug("Could not resolve brightness level");
@@ -465,7 +488,7 @@ static nyx_error_t handle_notification_effect(nyx_device_handle_t handle, nyx_le
         case NYX_LED_CONTROLLER_EFFECT_LED_PULSATE:
             err = nyx_led_controller_core_configuration_get_param( effect.core_configuration 
                                                                    , NYX_LED_CONTROLLER_CORE_EFFECT_FADE_IN
-                                                                   , (int32_t *)&led_on);
+                                                                   , &led_on);
             if( err != NYX_ERROR_NONE )
             {
                 nyx_debug("Could not resolve pulse fade-in time");
@@ -474,7 +497,7 @@ static nyx_error_t handle_notification_effect(nyx_device_handle_t handle, nyx_le
 
             err = nyx_led_controller_core_configuration_get_param( effect.core_configuration 
                                                                    , NYX_LED_CONTROLLER_CORE_EFFECT_FADE_OUT
-                                                                   , (int32_t *)&led_off);
+                                                                   , &led_off);
             if( err != NYX_ERROR_NONE )
             {
                 nyx_debug("Could not resolve pulse fade-out time");
@@ -483,7 +506,7 @@ static nyx_error_t handle_notification_effect(nyx_device_handle_t handle, nyx_le
 
             err = nyx_led_controller_core_configuration_get_param( effect.core_configuration 
                                                                    , NYX_LED_CONTROLLER_CORE_EFFECT_BRIGHTNESS
-                                                                   , (int32_t *)&brightness);
+                                                                   , &brightness);
             if( err != NYX_ERROR_NONE )
             {
                 nyx_debug("Could not resolve pulse brightness level");
