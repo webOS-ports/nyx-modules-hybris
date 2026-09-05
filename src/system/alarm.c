@@ -43,7 +43,7 @@
  * @{
  */
 
-int32_t alarm_fd = -1;
+static int32_t alarm_fd = -1;
 
 static time_t curr_expiry = 0;
 
@@ -51,7 +51,7 @@ static time_t curr_expiry = 0;
  * @brief Open Android Alarm device.
  *
  */
-bool android_alarm_open()
+bool android_alarm_open(void)
 {
 	if (alarm_fd >= 0)
 		return true;
@@ -68,7 +68,7 @@ bool android_alarm_open()
 /**
 * @brief Close Android Alarm device.
 */
-void android_alarm_close()
+void android_alarm_close(void)
 {
 	if (alarm_fd >= 0)
 	{
@@ -96,7 +96,7 @@ bool android_alarm_read(struct tm *tm_time)
 		return false;
 	}
 
-	if (localtime_r(&alarm_time.tv_sec, tm_time) == 0)
+	if (localtime_r(&alarm_time.tv_sec, tm_time) == NULL)
 		return false;
 
 	return true;
@@ -111,14 +111,14 @@ time_t android_alarm_time(time_t *time)
 	struct tm tm;
 	time_t t;
 
-	printf("%s\n", __FUNCTION__);
+	g_debug("%s", __FUNCTION__);
 
 	if (!android_alarm_read(&tm))
 		return -1;
 
 	t = timegm(&tm);
 
-	printf("%s after android_alarm_read %ld\n", __FUNCTION__);
+	g_debug("%s: after android_alarm_read %ld", __FUNCTION__, (long) t);
 
 	if (time)
 		*time = t;
@@ -143,7 +143,7 @@ bool android_alarm_set(time_t expiry)
 	struct timespec wakeup_time = { .tv_sec = 0, .tv_nsec = 0 };
 	int rc;
 
-	printf("%s\n", __FUNCTION__);
+	g_debug("%s", __FUNCTION__);
 
 	if (expiry == curr_expiry)
 		return true;
