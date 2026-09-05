@@ -77,10 +77,10 @@ void reset_lifetime_timer();
  *  open in /media/internal that prevent us from cleanly unmounting the
  *  partition there when going into brick mode.
  *
- * @param dirPath        fully-qualified path describing directory to search
+ * @param prefix         fully-qualified path describing directory to search
  *                       for files.
  */
-void log_blame(const char *dirPath);
+void log_blame(const char *prefix);
 
 
 #endif

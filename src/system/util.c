@@ -33,7 +33,7 @@
 static bool
 isNumber(const gchar *name)
 {
-	const char *sptr = name;
+	const char *sptr;
 	bool passes = true;
 
 	for (sptr = name; '\0' != *sptr; ++sptr)
@@ -73,7 +73,7 @@ log_blame(const char *prefix)
 				GDir *fddir;
 				fddir = g_dir_open(fdpath, 0, NULL);
 
-				if (NULL != dir)
+				if (NULL != fddir)
 				{
 					const gchar *nentry;
 					gchar *exe = NULL;
@@ -86,7 +86,8 @@ log_blame(const char *prefix)
 						{
 							gchar *link = g_file_read_link(lnpath, NULL);
 
-							if (g_ascii_strncasecmp(link, prefix, strlen(prefix)) == 0)
+							if (link != NULL &&
+							    g_ascii_strncasecmp(link, prefix, strlen(prefix)) == 0)
 							{
 								if (NULL == exe)
 								{
