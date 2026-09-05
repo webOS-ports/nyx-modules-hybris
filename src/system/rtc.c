@@ -52,7 +52,7 @@
  * @{
  */
 
-int32_t rtc_fd = -1;
+static int32_t rtc_fd = -1;
 
 #define STD_ASCTIME_BUF_SIZE    26
 
@@ -63,17 +63,17 @@ int32_t rtc_fd = -1;
 */
 
 static void
-rtc_time_to_tm(struct rtc_time *rtc_time, struct tm *tm_time)
+rtc_time_to_tm(const struct rtc_time *rtctime, struct tm *tm_time)
 {
-	g_return_if_fail(rtc_time && tm_time);
+	g_return_if_fail(rtctime && tm_time);
 
 	memset(tm_time, 0, sizeof(struct tm));
-	tm_time->tm_mon = rtc_time->tm_mon;
-	tm_time->tm_mday = rtc_time->tm_mday;
-	tm_time->tm_year = rtc_time->tm_year;
-	tm_time->tm_hour = rtc_time->tm_hour;
-	tm_time->tm_min  = rtc_time->tm_min;
-	tm_time->tm_sec  = rtc_time->tm_sec;
+	tm_time->tm_mon = rtctime->tm_mon;
+	tm_time->tm_mday = rtctime->tm_mday;
+	tm_time->tm_year = rtctime->tm_year;
+	tm_time->tm_hour = rtctime->tm_hour;
+	tm_time->tm_min  = rtctime->tm_min;
+	tm_time->tm_sec  = rtctime->tm_sec;
 	tm_time->tm_isdst = -1; /* not known */
 }
 #endif
@@ -83,18 +83,18 @@ rtc_time_to_tm(struct rtc_time *rtc_time, struct tm *tm_time)
 */
 
 static void
-tm_to_rtc_time(struct tm *tm_time, struct rtc_time *rtc_time)
+tm_to_rtc_time(const struct tm *tm_time, struct rtc_time *rtctime)
 {
-	g_return_if_fail(tm_time && rtc_time);
+	g_return_if_fail(tm_time && rtctime);
 
-	memset(rtc_time, 0, sizeof(struct rtc_time));
-	rtc_time->tm_mon = tm_time->tm_mon;
-	rtc_time->tm_mday = tm_time->tm_mday;
-	rtc_time->tm_year = tm_time->tm_year;
-	rtc_time->tm_hour = tm_time->tm_hour;
-	rtc_time->tm_min  = tm_time->tm_min;
-	rtc_time->tm_sec  = tm_time->tm_sec;
-	rtc_time->tm_isdst = -1;
+	memset(rtctime, 0, sizeof(struct rtc_time));
+	rtctime->tm_mon = tm_time->tm_mon;
+	rtctime->tm_mday = tm_time->tm_mday;
+	rtctime->tm_year = tm_time->tm_year;
+	rtctime->tm_hour = tm_time->tm_hour;
+	rtctime->tm_min  = tm_time->tm_min;
+	rtctime->tm_sec  = tm_time->tm_sec;
+	rtctime->tm_isdst = -1;
 }
 
 /**
@@ -102,7 +102,7 @@ tm_to_rtc_time(struct tm *tm_time, struct rtc_time *rtc_time)
 */
 
 static void
-tm_to_rtc_wkalrm(struct tm *tm_time, struct rtc_wkalrm *alarm)
+tm_to_rtc_wkalrm(const struct tm *tm_time, struct rtc_wkalrm *alarm)
 {
 	g_return_if_fail(tm_time && alarm);
 	tm_to_rtc_time(tm_time, &alarm->time);
@@ -115,7 +115,7 @@ tm_to_rtc_wkalrm(struct tm *tm_time, struct rtc_wkalrm *alarm)
  *
  */
 bool
-rtc_open()
+rtc_open(void)
 {
 #if DEV_RTC_IMPLEMENTED
 
@@ -217,7 +217,7 @@ rtc_clear_watch(void)
 * @brief Close rtc device.
 */
 void
-rtc_close()
+rtc_close(void)
 {
 	if (rtc_fd >= 0)
 	{
@@ -232,7 +232,7 @@ rtc_close()
 * @brief Obtain an fd for use in poll() or select().
 */
 int32_t
-rtc_getfd()
+rtc_getfd(void)
 {
 	return rtc_fd;
 }
@@ -251,9 +251,9 @@ rtc_read(struct tm *tm_time)
 		return false;
 	}
 
-	struct rtc_time rtc_time;
+	struct rtc_time rtctime;
 
-	int32_t ret = ioctl(rtc_fd, RTC_RD_TIME, &rtc_time);
+	int32_t ret = ioctl(rtc_fd, RTC_RD_TIME, &rtctime);
 
 	if (ret < 0)
 	{
@@ -262,7 +262,7 @@ rtc_read(struct tm *tm_time)
 		return false;
 	}
 
-	rtc_time_to_tm(&rtc_time, tm_time);
+	rtc_time_to_tm(&rtctime, tm_time);
 
 	return true;
 #else
@@ -499,27 +499,21 @@ error:
 * @retval
 */
 bool
-rtc_check_alarm()
+rtc_check_alarm(void)
 {
 #if DEV_RTC_IMPLEMENTED
 	unsigned long data;
-	int32_t ret;
+	ssize_t ret;
 
 	ret = read(rtc_fd, &data, sizeof(unsigned long));
 
-	if (ret < 0)
+	if (ret < (ssize_t) sizeof(data) || !(data & RTC_AF))
 	{
 		return false;
 	}
-	else if (data & RTC_AF)
-	{
-		rtc_clear_alarm();
-		return true;
-	}
-	else
-	{
-		return false;
-	}
+
+	rtc_clear_alarm();
+	return true;
 
 #else
 	return false;
