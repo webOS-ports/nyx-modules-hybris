@@ -31,6 +31,7 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <sys/un.h>
 #include <glib.h>
 #include <libsuspend.h>
@@ -220,6 +221,23 @@ nyx_error_t system_resume(nyx_device_handle_t handle, bool *success)
 }
 
 
+/* Runs a shutdown/reboot command and reports whether it succeeded. On
+ * success the command typically does not return control to us at all; if
+ * it does fail, the device is still running and the caller needs to know. */
+static nyx_error_t run_shutdown_command(const char *command)
+{
+	int status = system(command);
+
+	if (status == -1 || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
+	{
+		nyx_error(MSGID_NYX_HYBRIS_SYSTEM_SHUTDOWN_CMD_ERR, 0,
+		          "Failed to run '%s' (status %d)", command, status);
+		return NYX_ERROR_GENERIC;
+	}
+
+	return NYX_ERROR_NONE;
+}
+
 nyx_error_t system_shutdown(nyx_device_handle_t handle ,
                             nyx_system_shutdown_type_t type, const char *reason)
 {
@@ -231,17 +249,13 @@ nyx_error_t system_shutdown(nyx_device_handle_t handle ,
 	switch (type)
 	{
 		case NYX_SYSTEM_EMERG_SHUTDOWN:
-			system("halt -f");
-			break;
+			return run_shutdown_command("halt -f");
 
 		case NYX_SYSTEM_NORMAL_SHUTDOWN:
 		case NYX_SYSTEM_TEST_SHUTDOWN:
 		default:
-			system("shutdown -h now");
-			break;
+			return run_shutdown_command("shutdown -h now");
 	}
-
-	return NYX_ERROR_NONE;
 }
 
 
@@ -256,17 +270,13 @@ nyx_error_t system_reboot(nyx_device_handle_t handle ,
 	switch (type)
 	{
 		case NYX_SYSTEM_EMERG_SHUTDOWN:
-			system("reboot -f");
-			break;
+			return run_shutdown_command("reboot -f");
 
 		case NYX_SYSTEM_NORMAL_SHUTDOWN:
 		case NYX_SYSTEM_TEST_SHUTDOWN:
 		default:
-			system("reboot");
-			break;
+			return run_shutdown_command("reboot");
 	}
-
-	return NYX_ERROR_NONE;
 }
 
 
