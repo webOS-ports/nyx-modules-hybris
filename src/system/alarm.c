@@ -18,16 +18,30 @@
 *************************************************************************
 * @file alarm.c
 *
-* @brief Convenience functions to interact with the Android Alarm driver.
+* @brief Wakeup alarms backed by the kernel's alarmtimer framework.
+*
+* This used to drive the Android alarm-dev character device (/dev/alarm).
+* That driver was removed from upstream Linux in 3.10 and vendor trees
+* diverge even at the same version - a Pixel 3a 4.9 still ships /dev/alarm,
+* a Mi A1 4.9 does not - so on half our devices every call here failed with
+* ENOENT and then EBADF on an fd that stayed -1.
+*
+* timerfd_create(CLOCK_REALTIME_ALARM) is the in-kernel replacement, and the
+* one AOSP itself moved to. It has been available since Linux 3.11, so it is
+* a single path that works on both the old and the new devices.
+*
+* Note the scope: nothing reads or polls this descriptor. Arming the timer is
+* the whole point - an expiring CLOCK_REALTIME_ALARM brings the system out of
+* suspend, which is exactly what the old ANDROID_ALARM_SET(RTC_WAKEUP) ioctl
+* was for. rtc.c arms the RTC itself and calls in here in addition, to "make
+* sure we really wake up when in deep sleep".
 *************************************************************************
 */
 
-#include <linux/rtc.h>
-#include <sys/ioctl.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <errno.h>
-#include <stdio.h>
+#include <string.h>
+#include <sys/timerfd.h>
 #include <unistd.h>
 #include <time.h>
 #include <stdbool.h>
@@ -36,7 +50,18 @@
 #include <nyx/module/nyx_log.h>
 #include "msgid.h"
 #include "alarm.h"
-#include "android_alarm.h"
+
+/*
+ * Both are old enough to be everywhere we build, but a sufficiently ancient
+ * libc header set can still be missing them while the kernel supports them.
+ */
+#ifndef CLOCK_REALTIME_ALARM
+#define CLOCK_REALTIME_ALARM 8
+#endif
+
+#ifndef TFD_CLOEXEC
+#define TFD_CLOEXEC O_CLOEXEC
+#endif
 
 /**
  * @addtogroup RTCAlarms
@@ -45,57 +70,61 @@
 
 static int32_t alarm_fd = -1;
 
+/*
+ * False when we had to fall back to a plain CLOCK_REALTIME timer, which still
+ * expires correctly while the device is awake but cannot pull it out of
+ * suspend. Kept so the distinction is visible in the log rather than silently
+ * degrading a wakeup alarm into a normal one.
+ */
+static bool alarm_wakes_from_suspend = false;
+
 static time_t curr_expiry = 0;
 
-/*
- * /dev/alarm is the legacy Android alarm-dev driver. Kernels that dropped
- * drivers/staging/android/alarm-dev.c simply do not have it - upstream removed
- * it in 3.10, and vendor trees diverge even at the same version (a Pixel 3a
- * 4.9 still ships it, a Mi A1 4.9 does not). Its absence is a valid
- * configuration, not an error.
- *
- * Everything here is a *supplementary* deep-sleep hint: rtc.c arms the real
- * wakeup through /dev/rtc0 with RTC_WKALM_SET and only calls us in addition,
- * to "make sure we really wake up when in deep sleep". So when the node is
- * missing, the correct behaviour is to no-op quietly.
- *
- * Without this guard android_alarm_open() failed, left alarm_fd at -1, and
- * every later call still issued ioctl(-1, ...) -> EBADF. On a Mi A1 that meant
- * one "Could not open rtc driver. 2" at startup followed by "Failed to clear
- * alarm" on every RTC watchdog tick, forever.
- */
 static bool android_alarm_available(void)
 {
 	return alarm_fd >= 0;
 }
 
 /**
- * @brief Open Android Alarm device.
+ * @brief Create the wakeup alarm timer.
  *
  */
 bool android_alarm_open(void)
 {
+	int alarm_errno;
+
 	if (alarm_fd >= 0)
 		return true;
 
-	alarm_fd = open("/dev/alarm", O_RDWR);
-	if (alarm_fd < 0) {
-		if (errno == ENOENT) {
-			/* No alarm-dev on this kernel; rtc.c drives the real
-			 * wakeup through /dev/rtc0. Not an error. */
-			g_debug("No /dev/alarm on this kernel - Android alarm hints disabled");
-		} else {
-			g_critical("Could not open /dev/alarm. %d", errno);
-		}
+	alarm_fd = timerfd_create(CLOCK_REALTIME_ALARM, TFD_CLOEXEC | TFD_NONBLOCK);
+	if (alarm_fd >= 0) {
+		alarm_wakes_from_suspend = true;
+		return true;
+	}
 
+	alarm_errno = errno;
+
+	/*
+	 * CLOCK_REALTIME_ALARM needs CAP_WAKE_ALARM and a kernel with the
+	 * alarmtimer framework. Falling back keeps timed alarms working on a
+	 * device that has neither; it just cannot wake it from suspend.
+	 */
+	alarm_fd = timerfd_create(CLOCK_REALTIME, TFD_CLOEXEC | TFD_NONBLOCK);
+	if (alarm_fd < 0) {
+		g_critical("Could not create alarm timer. %d (CLOCK_REALTIME_ALARM: %d)",
+		           errno, alarm_errno);
 		return false;
 	}
+
+	alarm_wakes_from_suspend = false;
+	g_warning("CLOCK_REALTIME_ALARM unavailable (%d) - alarms will not wake the device from suspend",
+	          alarm_errno);
 
 	return true;
 }
 
 /**
-* @brief Close Android Alarm device.
+* @brief Destroy the wakeup alarm timer.
 */
 void android_alarm_close(void)
 {
@@ -104,62 +133,70 @@ void android_alarm_close(void)
 		close(alarm_fd);
 		alarm_fd = -1;
 	}
+
+	alarm_wakes_from_suspend = false;
+	curr_expiry = 0;
 }
 
 /**
-* @brief Read the RTC time from the Android Alarm driver.
+* @brief Read the current wall-clock time, broken down.
+*
+* The alarm timer runs on CLOCK_REALTIME, so that is the clock an expiry has
+* to be expressed against.
 */
 
 bool android_alarm_read(struct tm *tm_time)
 {
+	struct timespec now;
+
 	nyx_debug("%s", __FUNCTION__);
 
 	if (!tm_time)
 		return false;
 
-	if (!android_alarm_available())
-		return false;
-
-	struct timespec alarm_time = { .tv_sec = 0, .tv_nsec = 0 };
-
-	int32_t ret = ioctl(alarm_fd, ANDROID_ALARM_GET_TIME(ANDROID_ALARM_RTC), &alarm_time);
-	if (ret < 0) {
-		nyx_warn(MSGID_NYX_HYBRIS_ANDROID_ALARM_GET_TIME_ERR, 0, "ANDROID_ALARM_GET_TIME(ANDROID_ALARM_SYSTEMTIME) ioctl %d", errno);
+	if (clock_gettime(CLOCK_REALTIME, &now) != 0) {
+		nyx_warn(MSGID_NYX_HYBRIS_ANDROID_ALARM_GET_TIME_ERR, 0,
+		         "clock_gettime(CLOCK_REALTIME) %d", errno);
 		return false;
 	}
 
-	if (localtime_r(&alarm_time.tv_sec, tm_time) == NULL)
+	/*
+	 * gmtime_r, not localtime_r: callers pair this with timegm(), so handing
+	 * back a local-time breakdown made the round trip come out one UTC offset
+	 * in the future. android_alarm_set() then floored every expiry against
+	 * that, so in a UTC+2 zone an alarm due within the next two hours was
+	 * pushed out to roughly two hours away.
+	 */
+	if (gmtime_r(&now.tv_sec, tm_time) == NULL)
 		return false;
 
 	return true;
 }
 
 /**
-* @brief Read the RTC time and convert it in time_t.
+* @brief Read the current wall-clock time as a time_t.
 */
 
 time_t android_alarm_time(time_t *time)
 {
-	struct tm tm;
-	time_t t;
+	struct timespec now;
 
-	g_debug("%s", __FUNCTION__);
+	nyx_debug("%s", __FUNCTION__);
 
-	if (!android_alarm_read(&tm))
+	if (clock_gettime(CLOCK_REALTIME, &now) != 0) {
+		nyx_warn(MSGID_NYX_HYBRIS_ANDROID_ALARM_GET_TIME_ERR, 0,
+		         "clock_gettime(CLOCK_REALTIME) %d", errno);
 		return -1;
-
-	t = timegm(&tm);
-
-	g_debug("%s: after android_alarm_read %ld", __FUNCTION__, (long) t);
+	}
 
 	if (time)
-		*time = t;
+		*time = now.tv_sec;
 
-	return t;
+	return now.tv_sec;
 }
 
 /**
-* @brief Sets an rtc alarm to fire.
+* @brief Arm the wakeup alarm.
 *
 * Alarm expiry will be floored at 2 seconds in the future
 * (i.e. if expiry = now + 1, alarm will fire at now + 2).
@@ -171,11 +208,10 @@ time_t android_alarm_time(time_t *time)
 
 bool android_alarm_set(time_t expiry)
 {
+	struct itimerspec wakeup_time;
 	time_t now = 0;
-	struct timespec wakeup_time = { .tv_sec = 0, .tv_nsec = 0 };
-	int rc;
 
-	g_debug("%s", __FUNCTION__);
+	nyx_debug("%s", __FUNCTION__);
 
 	if (!android_alarm_available())
 		return false;
@@ -183,18 +219,20 @@ bool android_alarm_set(time_t expiry)
 	if (expiry == curr_expiry)
 		return true;
 
-	android_alarm_time(&now);
+	if (android_alarm_time(&now) < 0)
+		return false;
 
 	if (expiry < now + 2) {
 		g_debug("%s: expiry = now + 2", __FUNCTION__);
 		expiry = now + 2;
 	}
 
-	wakeup_time.tv_sec = expiry;
+	/* One-shot: it_interval stays zero. */
+	memset(&wakeup_time, 0, sizeof(wakeup_time));
+	wakeup_time.it_value.tv_sec = expiry;
 
-	rc = ioctl(alarm_fd, ANDROID_ALARM_SET(ANDROID_ALARM_RTC_WAKEUP), &wakeup_time);
-	if (rc != 0) {
-		g_warning("Failed to set wakeup alarm at %ld (err %d)", expiry, rc);
+	if (timerfd_settime(alarm_fd, TFD_TIMER_ABSTIME, &wakeup_time, NULL) != 0) {
+		g_warning("Failed to set wakeup alarm at %ld (err %d)", (long) expiry, errno);
 		return false;
 	}
 
@@ -204,18 +242,23 @@ bool android_alarm_set(time_t expiry)
 }
 
 /**
-* @brief Clear the RTC alarm, if its set.
+* @brief Disarm the wakeup alarm, if it is set.
 */
 
 bool android_alarm_clear(void)
 {
+	struct itimerspec disarm;
+
 	g_debug("%s: clearing...", __FUNCTION__);
 
 	if (!android_alarm_available())
 		return false;
 
-	if (ioctl(alarm_fd, ANDROID_ALARM_CLEAR(ANDROID_ALARM_RTC_WAKEUP)) != 0) {
-		g_warning("Failed to clear alarm");
+	/* An all-zero it_value disarms the timer. */
+	memset(&disarm, 0, sizeof(disarm));
+
+	if (timerfd_settime(alarm_fd, 0, &disarm, NULL) != 0) {
+		g_warning("Failed to clear alarm (err %d)", errno);
 		return false;
 	}
 
