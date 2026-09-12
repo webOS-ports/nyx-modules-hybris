@@ -47,6 +47,28 @@ static int32_t alarm_fd = -1;
 
 static time_t curr_expiry = 0;
 
+/*
+ * /dev/alarm is the legacy Android alarm-dev driver. Kernels that dropped
+ * drivers/staging/android/alarm-dev.c simply do not have it - upstream removed
+ * it in 3.10, and vendor trees diverge even at the same version (a Pixel 3a
+ * 4.9 still ships it, a Mi A1 4.9 does not). Its absence is a valid
+ * configuration, not an error.
+ *
+ * Everything here is a *supplementary* deep-sleep hint: rtc.c arms the real
+ * wakeup through /dev/rtc0 with RTC_WKALM_SET and only calls us in addition,
+ * to "make sure we really wake up when in deep sleep". So when the node is
+ * missing, the correct behaviour is to no-op quietly.
+ *
+ * Without this guard android_alarm_open() failed, left alarm_fd at -1, and
+ * every later call still issued ioctl(-1, ...) -> EBADF. On a Mi A1 that meant
+ * one "Could not open rtc driver. 2" at startup followed by "Failed to clear
+ * alarm" on every RTC watchdog tick, forever.
+ */
+static bool android_alarm_available(void)
+{
+	return alarm_fd >= 0;
+}
+
 /**
  * @brief Open Android Alarm device.
  *
@@ -58,7 +80,14 @@ bool android_alarm_open(void)
 
 	alarm_fd = open("/dev/alarm", O_RDWR);
 	if (alarm_fd < 0) {
-		g_critical("Could not open rtc driver. %d", errno);
+		if (errno == ENOENT) {
+			/* No alarm-dev on this kernel; rtc.c drives the real
+			 * wakeup through /dev/rtc0. Not an error. */
+			g_debug("No /dev/alarm on this kernel - Android alarm hints disabled");
+		} else {
+			g_critical("Could not open /dev/alarm. %d", errno);
+		}
+
 		return false;
 	}
 
@@ -86,6 +115,9 @@ bool android_alarm_read(struct tm *tm_time)
 	nyx_debug("%s", __FUNCTION__);
 
 	if (!tm_time)
+		return false;
+
+	if (!android_alarm_available())
 		return false;
 
 	struct timespec alarm_time = { .tv_sec = 0, .tv_nsec = 0 };
@@ -145,6 +177,9 @@ bool android_alarm_set(time_t expiry)
 
 	g_debug("%s", __FUNCTION__);
 
+	if (!android_alarm_available())
+		return false;
+
 	if (expiry == curr_expiry)
 		return true;
 
@@ -176,10 +211,15 @@ bool android_alarm_clear(void)
 {
 	g_debug("%s: clearing...", __FUNCTION__);
 
+	if (!android_alarm_available())
+		return false;
+
 	if (ioctl(alarm_fd, ANDROID_ALARM_CLEAR(ANDROID_ALARM_RTC_WAKEUP)) != 0) {
 		g_warning("Failed to clear alarm");
 		return false;
 	}
+
+	curr_expiry = 0;
 
 	return true;
 }
