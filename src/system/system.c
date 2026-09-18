@@ -211,8 +211,17 @@ nyx_error_t system_query_rtc_time(nyx_device_handle_t handle, time_t *time)
  *   1. read /sys/power/wakeup_count. The read blocks while any wakeup source
  *      is active - that includes every kernel wakelock in /sys/power/wake_lock,
  *      which is how sleepd activities, IPC clients and the display manager veto
- *      the suspend between the userspace vote and the kernel write. The kernel
- *      logs the active sources ("PM: active wakeup source: ...") while waiting.
+ *      the suspend between the userspace vote and the kernel write. Unlike
+ *      Android we do not wait indefinitely: nothing in LuneOS holds a wakelock
+ *      for "the screen is on", so a suspend that parked here for as long as,
+ *      say, the USB controller's wakeup source stays active (the whole time a
+ *      cable is plugged in) would fire the instant the cable is pulled, with
+ *      the user looking at the screen. The read is bounded to
+ *      WAKEUP_COUNT_WAIT_MS - long enough to absorb the short wakelocks an
+ *      interrupt handler holds, and on the scale of sleepd's own retry
+ *      interval (after_resume_idle_ms, 1 s by default). Past that we report
+ *      "not suspended" naming the sources still active and let sleepd re-run
+ *      its policy before trying again.
  *   2. write the value back. EBUSY (or EINVAL on older kernels) means a wakeup
  *      event raced with us: report "not suspended" and let sleepd retry after
  *      after_resume_idle_ms. That is the retry loop; there is none here.
@@ -257,39 +266,215 @@ static int write_sysfs_string(const char *path, const char *value)
 	return 0;
 }
 
-/*
- * Reads the current wakeup_count into buf, stripped of the trailing newline.
- * Returns 0 on success, -errno on failure. Blocks while a wakeup source is
- * active (see above); the kernel returns EINTR if a signal interrupts the wait.
- */
-static int read_wakeup_count(char *buf, size_t len)
+/* How long to wait for the kernel's wakeup sources to go quiet. */
+#define WAKEUP_COUNT_WAIT_MS 1000
+
+struct wakeup_count_read
 {
-	ssize_t n;
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	bool done;
+	int result;     /* 0, or -errno */
+	char buf[32];   /* the count, newline stripped */
+};
+
+static void close_fd_cleanup(void *arg)
+{
+	close(*(int *)arg);
+}
+
+/*
+ * Helper thread: the sysfs read blocks (interruptibly) while a wakeup source
+ * is active, so it runs here and the caller times it out with pthread_cancel.
+ * read() is the cancellation point; the fd is closed by the cleanup handler
+ * if the thread is unwound there.
+ */
+static void *wakeup_count_reader(void *arg)
+{
+	struct wakeup_count_read *r = arg;
+	int ret;
 	int fd = open(SYSFS_WAKEUP_COUNT, O_RDONLY | O_CLOEXEC);
 
 	if (fd < 0)
 	{
-		return -errno;
+		ret = -errno;
 	}
-
-	n = read(fd, buf, len - 1);
-
-	if (n < 0)
+	else
 	{
-		int err = errno;
-		close(fd);
-		return -err;
+		ssize_t n;
+		int old_state;
+
+		pthread_cleanup_push(close_fd_cleanup, &fd);
+		n = read(fd, r->buf, sizeof(r->buf) - 1);
+		ret = (n < 0) ? -errno : 0;
+		/* Past the blocking read: finish and report even if a cancel is pending. */
+		pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &old_state);
+		pthread_cleanup_pop(1);
+
+		if (ret == 0)
+		{
+			while (n > 0 && (r->buf[n - 1] == '\n' || r->buf[n - 1] == ' '))
+			{
+				n--;
+			}
+
+			r->buf[n] = '\0';
+			ret = (n > 0) ? 0 : -EIO;
+		}
 	}
 
-	close(fd);
+	pthread_mutex_lock(&r->lock);
+	r->result = ret;
+	r->done = true;
+	pthread_cond_signal(&r->cond);
+	pthread_mutex_unlock(&r->lock);
+	return NULL;
+}
 
-	while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == ' '))
+/*
+ * Reads the current wakeup_count into buf, waiting at most wait_ms for the
+ * kernel's wakeup sources to go quiet. Returns 0 on success, -ETIMEDOUT if a
+ * source was still active when the wait ran out, or -errno.
+ */
+static int read_wakeup_count(char *buf, size_t len, unsigned int wait_ms)
+{
+	struct wakeup_count_read r = { .done = false, .result = -EIO, .buf = "" };
+	pthread_condattr_t cattr;
+	pthread_t tid;
+	struct timespec deadline;
+	int ret;
+
+	pthread_mutex_init(&r.lock, NULL);
+	pthread_condattr_init(&cattr);
+	pthread_condattr_setclock(&cattr, CLOCK_MONOTONIC);
+	pthread_cond_init(&r.cond, &cattr);
+	pthread_condattr_destroy(&cattr);
+
+	ret = pthread_create(&tid, NULL, wakeup_count_reader, &r);
+
+	if (ret != 0)
 	{
-		n--;
+		pthread_cond_destroy(&r.cond);
+		pthread_mutex_destroy(&r.lock);
+		return -ret;
 	}
 
-	buf[n] = '\0';
-	return (n > 0) ? 0 : -EIO;
+	clock_gettime(CLOCK_MONOTONIC, &deadline);
+	deadline.tv_sec += wait_ms / 1000;
+	deadline.tv_nsec += (long)(wait_ms % 1000) * 1000000L;
+
+	if (deadline.tv_nsec >= 1000000000L)
+	{
+		deadline.tv_sec++;
+		deadline.tv_nsec -= 1000000000L;
+	}
+
+	pthread_mutex_lock(&r.lock);
+
+	while (!r.done)
+	{
+		if (pthread_cond_timedwait(&r.cond, &r.lock, &deadline) == ETIMEDOUT)
+		{
+			break;
+		}
+	}
+
+	pthread_mutex_unlock(&r.lock);
+
+	if (!r.done)
+	{
+		pthread_cancel(tid);
+	}
+
+	pthread_join(tid, NULL);
+	pthread_cond_destroy(&r.cond);
+	pthread_mutex_destroy(&r.lock);
+
+	/* r.done may have flipped between the timeout and the cancel. */
+	if (!r.done)
+	{
+		return -ETIMEDOUT;
+	}
+
+	if (r.result == 0)
+	{
+		g_strlcpy(buf, r.buf, len);
+	}
+
+	return r.result;
+}
+
+/*
+ * Names the wakeup sources that are active right now, comma separated, for
+ * the log. Best effort: /sys/class/wakeup (5.4+) first, then the debugfs
+ * table older kernels have; an empty string if neither is readable.
+ */
+static void active_wakeup_sources(char *out, size_t len)
+{
+	const char *dir_path = "/sys/class/wakeup";
+	GDir *dir;
+	FILE *f;
+	char line[512];
+
+	out[0] = '\0';
+	dir = g_dir_open(dir_path, 0, NULL);
+
+	if (dir)
+	{
+		const char *entry;
+
+		while ((entry = g_dir_read_name(dir)) != NULL)
+		{
+			char *path = g_build_filename(dir_path, entry, "active_time_ms", NULL);
+			char *contents = NULL;
+			char *name = NULL;
+
+			if (g_file_get_contents(path, &contents, NULL, NULL) &&
+			        g_ascii_strtoll(contents, NULL, 10) > 0)
+			{
+				char *name_path = g_build_filename(dir_path, entry, "name", NULL);
+				g_file_get_contents(name_path, &name, NULL, NULL);
+				g_free(name_path);
+			}
+
+			if (name)
+			{
+				g_strchomp(name);
+				g_strlcat(out, out[0] ? "," : "", len);
+				g_strlcat(out, name, len);
+			}
+
+			g_free(name);
+			g_free(contents);
+			g_free(path);
+		}
+
+		g_dir_close(dir);
+		return;
+	}
+
+	f = fopen("/sys/kernel/debug/wakeup_sources", "r");
+
+	if (!f)
+	{
+		return;
+	}
+
+	/* name active_count event_count wakeup_count expire_count active_since ... */
+	while (fgets(line, sizeof(line), f))
+	{
+		char name[128];
+		unsigned long long active_since;
+
+		if (sscanf(line, "%127s %*u %*u %*u %*u %llu", name, &active_since) == 2 &&
+		        active_since != 0)
+		{
+			g_strlcat(out, out[0] ? "," : "", len);
+			g_strlcat(out, name, len);
+		}
+	}
+
+	fclose(f);
 }
 
 static double boottime_now(void)
@@ -320,9 +505,19 @@ static nyx_error_t suspend_blocking(nyx_device_handle_t handle, bool *success)
 		*success = false;
 	}
 
-	ret = read_wakeup_count(count, sizeof(count));
+	ret = read_wakeup_count(count, sizeof(count), WAKEUP_COUNT_WAIT_MS);
 
-	if (ret == -ENOENT)
+	if (ret == -ETIMEDOUT)
+	{
+		char active[256];
+
+		active_wakeup_sources(active, sizeof(active));
+		nyx_info(MSGID_NYX_HYBRIS_SYSTEM_SUSPEND, 0,
+		         "not suspended: wakeup source still active after %u ms: %s",
+		         WAKEUP_COUNT_WAIT_MS, active[0] ? active : "(unknown)");
+		return NYX_ERROR_NONE;
+	}
+	else if (ret == -ENOENT)
 	{
 		/* No wakeup_count on this kernel: no handshake possible, suspend blind. */
 		nyx_info(MSGID_NYX_HYBRIS_SYSTEM_SUSPEND, 0,
