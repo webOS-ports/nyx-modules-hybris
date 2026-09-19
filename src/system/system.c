@@ -477,6 +477,61 @@ static void active_wakeup_sources(char *out, size_t len)
 	fclose(f);
 }
 
+/*
+ * What ended the last sleep, for the resume log line: the IRQ the kernel
+ * recorded in /sys/power/pm_wakeup_irq (cleared on each suspend; ENODATA when
+ * the wake was not an IRQ the core saw, e.g. an alarm through the RTC's own
+ * path) named through /proc/interrupts, plus whatever wakeup sources are
+ * still active. Best effort, empty when nothing is readable. Measured need:
+ * on tissot the kernel names only the fuel gauge's wakes itself, and 170 of
+ * 203 resumes in a four-hour run went unexplained.
+ */
+static void describe_wake(char *out, size_t len)
+{
+	char *irq = NULL;
+	char *table = NULL;
+	char active[256];
+
+	out[0] = '\0';
+
+	if (g_file_get_contents("/sys/power/pm_wakeup_irq", &irq, NULL, NULL) && irq[0])
+	{
+		const char *name = NULL;
+		char **lines = NULL;
+		gint i;
+
+		g_strchomp(irq);
+		if (g_file_get_contents("/proc/interrupts", &table, NULL, NULL))
+		{
+			lines = g_strsplit(table, "\n", -1);
+			for (i = 0; lines && lines[i]; i++)
+			{
+				char *line = g_strchug(lines[i]);
+				size_t n = strlen(irq);
+
+				if (strncmp(line, irq, n) == 0 && line[n] == ':')
+				{
+					/* the action name is the last field on the line */
+					char *last = strrchr(g_strchomp(line), ' ');
+					name = last ? last + 1 : line;
+					break;
+				}
+			}
+		}
+		g_snprintf(out, len, "wake irq %s (%s)", irq, name ? name : "?");
+		g_strfreev(lines);
+	}
+	g_free(table);
+	g_free(irq);
+
+	active_wakeup_sources(active, sizeof(active));
+	if (active[0])
+	{
+		g_strlcat(out, out[0] ? "; active: " : "active: ", len);
+		g_strlcat(out, active, len);
+	}
+}
+
 static double boottime_now(void)
 {
 	struct timespec ts;
@@ -555,8 +610,15 @@ static nyx_error_t suspend_blocking(nyx_device_handle_t handle, bool *success)
 		return NYX_ERROR_NONE;
 	}
 
-	nyx_info(MSGID_NYX_HYBRIS_SYSTEM_SUSPEND, 0,
-	         "suspended and resumed after %.1f s", boottime_now() - t0);
+	{
+		char wake[320];
+		double asleep = boottime_now() - t0;
+
+		describe_wake(wake, sizeof(wake));
+		nyx_info(MSGID_NYX_HYBRIS_SYSTEM_SUSPEND, 0,
+		         "suspended and resumed after %.1f s%s%s", asleep,
+		         wake[0] ? ": " : "", wake);
+	}
 
 	if (success)
 	{
