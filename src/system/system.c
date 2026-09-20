@@ -460,18 +460,36 @@ static void active_wakeup_sources(char *out, size_t len)
 		return;
 	}
 
-	/* name active_count event_count wakeup_count expire_count active_since ... */
+	/*
+	 * "%-32s\t%lu\t%lu\t%lu\t%lu\t%lld\t..." per source: name, active_count,
+	 * event_count, wakeup_count, expire_count, active_since. The name is a
+	 * fixed column padded with spaces and can be empty (tissot has one such
+	 * source), so the first field has to be taken up to the tab: reading it
+	 * as the first whitespace-separated token shifts every column by one for
+	 * those rows and reports the active count as if it were the name, which
+	 * is where the phantom source "46" in tissot's resume logs came from.
+	 */
 	while (fgets(line, sizeof(line), f))
 	{
-		char name[128];
+		char *sep = strchr(line, '\t');
 		unsigned long long active_since;
 
-		if (sscanf(line, "%127s %*u %*u %*u %*u %llu", name, &active_since) == 2 &&
-		        active_since != 0)
+		if (!sep)
 		{
-			g_strlcat(out, out[0] ? "," : "", len);
-			g_strlcat(out, name, len);
+			continue;
 		}
+
+		*sep = '\0';
+		g_strstrip(line);
+
+		if (sscanf(sep + 1, "%*u %*u %*u %*u %llu", &active_since) != 1 ||
+		        active_since == 0)
+		{
+			continue;
+		}
+
+		g_strlcat(out, out[0] ? "," : "", len);
+		g_strlcat(out, line[0] ? line : "(unnamed)", len);
 	}
 
 	fclose(f);
