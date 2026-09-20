@@ -477,6 +477,8 @@ static void active_wakeup_sources(char *out, size_t len)
 	fclose(f);
 }
 
+static void name_numeric_source(const char *token, char *out, size_t len);
+
 /*
  * What ended the last sleep, for the resume log line: the IRQ the kernel
  * recorded in /sys/power/pm_wakeup_irq (cleared on each suspend; ENODATA when
@@ -527,10 +529,64 @@ static void describe_wake(char *out, size_t len)
 	active_wakeup_sources(active, sizeof(active));
 	if (active[0])
 	{
+		char **tok = g_strsplit(active, ",", -1);
+		gint t;
+
 		g_strlcat(out, out[0] ? "; active: " : "active: ", len);
-		g_strlcat(out, active, len);
+		for (t = 0; tok && tok[t]; t++)
+		{
+			char named[96];
+
+			name_numeric_source(tok[t], named, sizeof(named));
+			g_strlcat(out, t ? "," : "", len);
+			g_strlcat(out, named, len);
+		}
+		g_strfreev(tok);
 	}
 }
+
+static void name_numeric_source(const char *token, char *out, size_t len)
+{
+	char *table = NULL;
+	char **lines = NULL;
+	gint i;
+
+	g_strlcpy(out, token, len);
+
+	for (i = 0; token[i]; i++)
+	{
+		if (!g_ascii_isdigit(token[i]))
+		{
+			return;
+		}
+	}
+
+	if (!g_file_get_contents("/proc/interrupts", &table, NULL, NULL))
+	{
+		return;
+	}
+
+	lines = g_strsplit(table, "\n", -1);
+	for (i = 0; lines && lines[i]; i++)
+	{
+		char *line = g_strchug(lines[i]);
+		size_t n = strlen(token);
+
+		if (strncmp(line, token, n) == 0 && line[n] == ':')
+		{
+			char *last = strrchr(g_strchomp(line), ' ');
+
+			if (last && last[1])
+			{
+				g_snprintf(out, len, "%s (%s)", token, last + 1);
+			}
+			break;
+		}
+	}
+	g_strfreev(lines);
+	g_free(table);
+}
+
 
 static double boottime_now(void)
 {
