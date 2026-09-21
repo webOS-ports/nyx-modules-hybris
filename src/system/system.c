@@ -29,12 +29,13 @@
 #include <stdbool.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <time.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <sys/un.h>
 #include <glib.h>
-#include <libsuspend.h>
 #include "rtc.h"
 #include <nyx/nyx_module.h>
 #include <nyx/common/nyx_macros.h>
@@ -82,6 +83,10 @@ nyx_error_t nyx_module_open(nyx_instance_t i, nyx_device_t **d)
 	                           "system_query_rtc_time");
 
 	nyx_module_register_method(i, (nyx_device_t *)nyxDev,
+	                           NYX_SYSTEM_SUSPEND_MODULE_METHOD,
+	                           "system_suspend");
+
+	nyx_module_register_method(i, (nyx_device_t *)nyxDev,
 	                           NYX_SYSTEM_SUSPEND_ASYNC_MODULE_METHOD,
 	                           "system_suspend_async");
 
@@ -100,8 +105,6 @@ nyx_error_t nyx_module_open(nyx_instance_t i, nyx_device_t **d)
 	nyx_module_register_method(i, (nyx_device_t *)nyxDev,
 	                           NYX_SYSTEM_ERASE_PARTITION_MODULE_METHOD,
 	                           "system_erase_partition");
-
-	libsuspend_init(0);
 
 	*d = (nyx_device_t *)nyxDev;
 	return NYX_ERROR_NONE;
@@ -193,29 +196,552 @@ nyx_error_t system_query_rtc_time(nyx_device_handle_t handle, time_t *time)
 }
 
 
-nyx_error_t system_suspend_async(nyx_device_handle_t handle, bool *success)
-{
-	if (handle != nyxDev)
-		return NYX_ERROR_INVALID_HANDLE;
+/*
+ * Suspend: one-shot, blocking, with the wakeup_count handshake.
+ *
+ * sleepd calls nyx_system_suspend_async() from MachineSleep() on its own
+ * suspend thread and treats the call as the whole sleep: when it returns the
+ * state machine goes straight to kernel-resume (resume signal, MachineWakeup,
+ * idle check rescheduled). Both suspend entry points therefore share this one
+ * body and block until the kernel has resumed or refused to enter suspend.
+ *
+ * The handshake mirrors what Android's SystemSuspend does and works the same
+ * on kernels with and without PM_AUTOSLEEP:
+ *
+ *   1. read /sys/power/wakeup_count. The read blocks while any wakeup source
+ *      is active - that includes every kernel wakelock in /sys/power/wake_lock,
+ *      which is how sleepd activities, IPC clients and the display manager veto
+ *      the suspend between the userspace vote and the kernel write. Unlike
+ *      Android we do not wait indefinitely: nothing in LuneOS holds a wakelock
+ *      for "the screen is on", so a suspend that parked here for as long as,
+ *      say, the USB controller's wakeup source stays active (the whole time a
+ *      cable is plugged in) would fire the instant the cable is pulled, with
+ *      the user looking at the screen. The read is bounded to
+ *      WAKEUP_COUNT_WAIT_MS - long enough to absorb the short wakelocks an
+ *      interrupt handler holds, and on the scale of sleepd's own retry
+ *      interval (after_resume_idle_ms, 1 s by default). Past that we report
+ *      "not suspended" naming the sources still active and let sleepd re-run
+ *      its policy before trying again.
+ *   2. write the value back. EBUSY (or EINVAL on older kernels) means a wakeup
+ *      event raced with us: report "not suspended" and let sleepd retry after
+ *      after_resume_idle_ms. That is the retry loop; there is none here.
+ *   3. write "mem" to /sys/power/state. Returns 0 once the kernel has resumed;
+ *      -EBUSY if a wakeup arrived during entry (also "not suspended").
+ *
+ * /sys/power/autosleep is never armed: an opportunistic re-suspend loop the
+ * kernel runs on its own leaves sleepd unable to tell wake from sleep and,
+ * measured on a PinePhone Pro, turns the device into a zombie that re-suspends
+ * before userspace can take a wakelock. system_resume() only disarms it, in
+ * case something else did.
+ *
+ * *success = false with NYX_ERROR_NONE means "retry later"; an NYX error is
+ * reserved for a bad handle.
+ */
 
-	libsuspend_prepare_suspend();
-	libsuspend_enter_suspend();
+#define SYSFS_POWER_STATE   "/sys/power/state"
+#define SYSFS_WAKEUP_COUNT  "/sys/power/wakeup_count"
+#define SYSFS_AUTOSLEEP     "/sys/power/autosleep"
+
+/* Returns 0, or -errno. */
+static int write_sysfs_string(const char *path, const char *value)
+{
+	ssize_t written;
+	int fd = open(path, O_WRONLY | O_CLOEXEC);
+
+	if (fd < 0)
+	{
+		return -errno;
+	}
+
+	written = write(fd, value, strlen(value));
+
+	if (written < 0)
+	{
+		int err = errno;
+		close(fd);
+		return -err;
+	}
+
+	close(fd);
+	return 0;
+}
+
+/* How long to wait for the kernel's wakeup sources to go quiet. */
+#define WAKEUP_COUNT_WAIT_MS 1000
+
+struct wakeup_count_read
+{
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	bool done;
+	int result;     /* 0, or -errno */
+	char buf[32];   /* the count, newline stripped */
+};
+
+static void close_fd_cleanup(void *arg)
+{
+	close(*(int *)arg);
+}
+
+/*
+ * Helper thread: the sysfs read blocks (interruptibly) while a wakeup source
+ * is active, so it runs here and the caller times it out with pthread_cancel.
+ * read() is the cancellation point; the fd is closed by the cleanup handler
+ * if the thread is unwound there.
+ */
+static void *wakeup_count_reader(void *arg)
+{
+	struct wakeup_count_read *r = arg;
+	int ret;
+	int fd = open(SYSFS_WAKEUP_COUNT, O_RDONLY | O_CLOEXEC);
+
+	if (fd < 0)
+	{
+		ret = -errno;
+	}
+	else
+	{
+		ssize_t n;
+		int old_state;
+
+		pthread_cleanup_push(close_fd_cleanup, &fd);
+		n = read(fd, r->buf, sizeof(r->buf) - 1);
+		ret = (n < 0) ? -errno : 0;
+		/* Past the blocking read: finish and report even if a cancel is pending. */
+		pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &old_state);
+		pthread_cleanup_pop(1);
+
+		if (ret == 0)
+		{
+			while (n > 0 && (r->buf[n - 1] == '\n' || r->buf[n - 1] == ' '))
+			{
+				n--;
+			}
+
+			r->buf[n] = '\0';
+			ret = (n > 0) ? 0 : -EIO;
+		}
+	}
+
+	pthread_mutex_lock(&r->lock);
+	r->result = ret;
+	r->done = true;
+	pthread_cond_signal(&r->cond);
+	pthread_mutex_unlock(&r->lock);
+	return NULL;
+}
+
+/*
+ * Reads the current wakeup_count into buf, waiting at most wait_ms for the
+ * kernel's wakeup sources to go quiet. Returns 0 on success, -ETIMEDOUT if a
+ * source was still active when the wait ran out, or -errno.
+ */
+static int read_wakeup_count(char *buf, size_t len, unsigned int wait_ms)
+{
+	struct wakeup_count_read r = { .done = false, .result = -EIO, .buf = "" };
+	pthread_condattr_t cattr;
+	pthread_t tid;
+	struct timespec deadline;
+	int ret;
+
+	pthread_mutex_init(&r.lock, NULL);
+	pthread_condattr_init(&cattr);
+	pthread_condattr_setclock(&cattr, CLOCK_MONOTONIC);
+	pthread_cond_init(&r.cond, &cattr);
+	pthread_condattr_destroy(&cattr);
+
+	ret = pthread_create(&tid, NULL, wakeup_count_reader, &r);
+
+	if (ret != 0)
+	{
+		pthread_cond_destroy(&r.cond);
+		pthread_mutex_destroy(&r.lock);
+		return -ret;
+	}
+
+	clock_gettime(CLOCK_MONOTONIC, &deadline);
+	deadline.tv_sec += wait_ms / 1000;
+	deadline.tv_nsec += (long)(wait_ms % 1000) * 1000000L;
+
+	if (deadline.tv_nsec >= 1000000000L)
+	{
+		deadline.tv_sec++;
+		deadline.tv_nsec -= 1000000000L;
+	}
+
+	pthread_mutex_lock(&r.lock);
+
+	while (!r.done)
+	{
+		if (pthread_cond_timedwait(&r.cond, &r.lock, &deadline) == ETIMEDOUT)
+		{
+			break;
+		}
+	}
+
+	pthread_mutex_unlock(&r.lock);
+
+	if (!r.done)
+	{
+		pthread_cancel(tid);
+	}
+
+	pthread_join(tid, NULL);
+	pthread_cond_destroy(&r.cond);
+	pthread_mutex_destroy(&r.lock);
+
+	/* r.done may have flipped between the timeout and the cancel. */
+	if (!r.done)
+	{
+		return -ETIMEDOUT;
+	}
+
+	if (r.result == 0)
+	{
+		g_strlcpy(buf, r.buf, len);
+	}
+
+	return r.result;
+}
+
+/*
+ * Names the wakeup sources that are active right now, comma separated, for
+ * the log. Best effort: /sys/class/wakeup (5.4+) first, then the debugfs
+ * table older kernels have; an empty string if neither is readable.
+ */
+static void active_wakeup_sources(char *out, size_t len)
+{
+	const char *dir_path = "/sys/class/wakeup";
+	GDir *dir;
+	FILE *f;
+	char line[512];
+
+	out[0] = '\0';
+	dir = g_dir_open(dir_path, 0, NULL);
+
+	if (dir)
+	{
+		const char *entry;
+
+		while ((entry = g_dir_read_name(dir)) != NULL)
+		{
+			char *path = g_build_filename(dir_path, entry, "active_time_ms", NULL);
+			char *contents = NULL;
+			char *name = NULL;
+
+			if (g_file_get_contents(path, &contents, NULL, NULL) &&
+			        g_ascii_strtoll(contents, NULL, 10) > 0)
+			{
+				char *name_path = g_build_filename(dir_path, entry, "name", NULL);
+				g_file_get_contents(name_path, &name, NULL, NULL);
+				g_free(name_path);
+			}
+
+			if (name)
+			{
+				g_strchomp(name);
+				g_strlcat(out, out[0] ? "," : "", len);
+				g_strlcat(out, name, len);
+			}
+
+			g_free(name);
+			g_free(contents);
+			g_free(path);
+		}
+
+		g_dir_close(dir);
+		return;
+	}
+
+	f = fopen("/sys/kernel/debug/wakeup_sources", "r");
+
+	if (!f)
+	{
+		return;
+	}
+
+	/*
+	 * "%-32s\t%lu\t%lu\t%lu\t%lu\t%lld\t..." per source: name, active_count,
+	 * event_count, wakeup_count, expire_count, active_since. The name is a
+	 * fixed column padded with spaces and can be empty (tissot has one such
+	 * source), so the first field has to be taken up to the tab: reading it
+	 * as the first whitespace-separated token shifts every column by one for
+	 * those rows and reports the active count as if it were the name, which
+	 * is where the phantom source "46" in tissot's resume logs came from.
+	 */
+	while (fgets(line, sizeof(line), f))
+	{
+		char *sep = strchr(line, '\t');
+		unsigned long long active_since;
+
+		if (!sep)
+		{
+			continue;
+		}
+
+		*sep = '\0';
+		g_strstrip(line);
+
+		if (sscanf(sep + 1, "%*u %*u %*u %*u %llu", &active_since) != 1 ||
+		        active_since == 0)
+		{
+			continue;
+		}
+
+		g_strlcat(out, out[0] ? "," : "", len);
+		g_strlcat(out, line[0] ? line : "(unnamed)", len);
+	}
+
+	fclose(f);
+}
+
+static void name_numeric_source(const char *token, char *out, size_t len);
+
+/*
+ * What ended the last sleep, for the resume log line: the IRQ the kernel
+ * recorded in /sys/power/pm_wakeup_irq (cleared on each suspend; ENODATA when
+ * the wake was not an IRQ the core saw, e.g. an alarm through the RTC's own
+ * path) named through /proc/interrupts, plus whatever wakeup sources are
+ * still active. Best effort, empty when nothing is readable. Measured need:
+ * on tissot the kernel names only the fuel gauge's wakes itself, and 170 of
+ * 203 resumes in a four-hour run went unexplained.
+ */
+static void describe_wake(char *out, size_t len)
+{
+	char *irq = NULL;
+	char *table = NULL;
+	char active[256];
+
+	out[0] = '\0';
+
+	if (g_file_get_contents("/sys/power/pm_wakeup_irq", &irq, NULL, NULL) && irq[0])
+	{
+		const char *name = NULL;
+		char **lines = NULL;
+		gint i;
+
+		g_strchomp(irq);
+		if (g_file_get_contents("/proc/interrupts", &table, NULL, NULL))
+		{
+			lines = g_strsplit(table, "\n", -1);
+			for (i = 0; lines && lines[i]; i++)
+			{
+				char *line = g_strchug(lines[i]);
+				size_t n = strlen(irq);
+
+				if (strncmp(line, irq, n) == 0 && line[n] == ':')
+				{
+					/* the action name is the last field on the line */
+					char *last = strrchr(g_strchomp(line), ' ');
+					name = last ? last + 1 : line;
+					break;
+				}
+			}
+		}
+		g_snprintf(out, len, "wake irq %s (%s)", irq, name ? name : "?");
+		g_strfreev(lines);
+	}
+	g_free(table);
+	g_free(irq);
+
+	active_wakeup_sources(active, sizeof(active));
+	if (active[0])
+	{
+		char **tok = g_strsplit(active, ",", -1);
+		gint t;
+
+		g_strlcat(out, out[0] ? "; active: " : "active: ", len);
+		for (t = 0; tok && tok[t]; t++)
+		{
+			char named[96];
+
+			name_numeric_source(tok[t], named, sizeof(named));
+			g_strlcat(out, t ? "," : "", len);
+			g_strlcat(out, named, len);
+		}
+		g_strfreev(tok);
+	}
+}
+
+static void name_numeric_source(const char *token, char *out, size_t len)
+{
+	char *table = NULL;
+	char **lines = NULL;
+	gint i;
+
+	g_strlcpy(out, token, len);
+
+	for (i = 0; token[i]; i++)
+	{
+		if (!g_ascii_isdigit(token[i]))
+		{
+			return;
+		}
+	}
+
+	if (!g_file_get_contents("/proc/interrupts", &table, NULL, NULL))
+	{
+		return;
+	}
+
+	lines = g_strsplit(table, "\n", -1);
+	for (i = 0; lines && lines[i]; i++)
+	{
+		char *line = g_strchug(lines[i]);
+		size_t n = strlen(token);
+
+		if (strncmp(line, token, n) == 0 && line[n] == ':')
+		{
+			char *last = strrchr(g_strchomp(line), ' ');
+
+			if (last && last[1])
+			{
+				g_snprintf(out, len, "%s (%s)", token, last + 1);
+			}
+			break;
+		}
+	}
+	g_strfreev(lines);
+	g_free(table);
+}
+
+
+static double boottime_now(void)
+{
+	struct timespec ts;
+
+	if (clock_gettime(CLOCK_BOOTTIME, &ts) != 0)
+	{
+		return 0.0;
+	}
+
+	return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+static nyx_error_t suspend_blocking(nyx_device_handle_t handle, bool *success)
+{
+	char count[32];
+	double t0;
+	int ret;
+
+	if (handle != nyxDev)
+	{
+		return NYX_ERROR_INVALID_HANDLE;
+	}
 
 	if (success)
+	{
+		*success = false;
+	}
+
+	ret = read_wakeup_count(count, sizeof(count), WAKEUP_COUNT_WAIT_MS);
+
+	if (ret == -ETIMEDOUT)
+	{
+		char active[256];
+
+		active_wakeup_sources(active, sizeof(active));
+		nyx_info(MSGID_NYX_HYBRIS_SYSTEM_SUSPEND, 0,
+		         "not suspended: wakeup source still active after %u ms: %s",
+		         WAKEUP_COUNT_WAIT_MS, active[0] ? active : "(unknown)");
+		return NYX_ERROR_NONE;
+	}
+	else if (ret == -ENOENT)
+	{
+		/* No wakeup_count on this kernel: no handshake possible, suspend blind. */
+		nyx_info(MSGID_NYX_HYBRIS_SYSTEM_SUSPEND, 0,
+		         "no " SYSFS_WAKEUP_COUNT ", suspending without the handshake");
+	}
+	else if (ret < 0)
+	{
+		nyx_info(MSGID_NYX_HYBRIS_SYSTEM_SUSPEND, 0,
+		         "not suspended: reading " SYSFS_WAKEUP_COUNT " failed: %s (%d)",
+		         strerror(-ret), -ret);
+		return NYX_ERROR_NONE;
+	}
+	else
+	{
+		ret = write_sysfs_string(SYSFS_WAKEUP_COUNT, count);
+
+		if (ret < 0)
+		{
+			/* EBUSY (EINVAL on old kernels): a wakeup event raced us. */
+			nyx_info(MSGID_NYX_HYBRIS_SYSTEM_SUSPEND, 0,
+			         "not suspended: wakeup_count %s changed under us: %s (%d)",
+			         count, strerror(-ret), -ret);
+			return NYX_ERROR_NONE;
+		}
+	}
+
+	t0 = boottime_now();
+	ret = write_sysfs_string(SYSFS_POWER_STATE, "mem");
+
+	if (ret < 0)
+	{
+		nyx_info(MSGID_NYX_HYBRIS_SYSTEM_SUSPEND, 0,
+		         "not suspended: writing mem to " SYSFS_POWER_STATE " failed: %s (%d)",
+		         strerror(-ret), -ret);
+		return NYX_ERROR_NONE;
+	}
+
+	{
+		char wake[320];
+		double asleep = boottime_now() - t0;
+
+		describe_wake(wake, sizeof(wake));
+		nyx_info(MSGID_NYX_HYBRIS_SYSTEM_SUSPEND, 0,
+		         "suspended and resumed after %.1f s%s%s", asleep,
+		         wake[0] ? ": " : "", wake);
+	}
+
+	if (success)
+	{
 		*success = true;
+	}
 
 	return NYX_ERROR_NONE;
 }
 
+nyx_error_t system_suspend(nyx_device_handle_t handle, bool *success)
+{
+	return suspend_blocking(handle, success);
+}
+
+nyx_error_t system_suspend_async(nyx_device_handle_t handle, bool *success)
+{
+	return suspend_blocking(handle, success);
+}
+
+/*
+ * Nothing to undo after a one-shot suspend. Disarm autosleep defensively, only
+ * where the node exists: an image whose previous nyx build armed it, or anything
+ * else that did, would otherwise leave the device unable to stay awake.
+ */
 nyx_error_t system_resume(nyx_device_handle_t handle, bool *success)
 {
-	if (handle != nyxDev)
-		return NYX_ERROR_INVALID_HANDLE;
+	int ret;
 
-	libsuspend_exit_suspend();
+	if (handle != nyxDev)
+	{
+		return NYX_ERROR_INVALID_HANDLE;
+	}
+
+	if (access(SYSFS_AUTOSLEEP, W_OK) == 0)
+	{
+		ret = write_sysfs_string(SYSFS_AUTOSLEEP, "off");
+
+		if (ret < 0)
+		{
+			nyx_info(MSGID_NYX_HYBRIS_SYSTEM_SUSPEND, 0,
+			         "disarming " SYSFS_AUTOSLEEP " failed: %s (%d)",
+			         strerror(-ret), -ret);
+		}
+	}
 
 	if (success)
+	{
 		*success = true;
+	}
 
 	return NYX_ERROR_NONE;
 }

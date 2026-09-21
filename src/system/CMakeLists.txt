@@ -18,4 +18,4 @@ include_directories(.)
 
 webos_build_nyx_module(SystemMain 
                        SOURCES system.c rtc.c alarm.c
-                       LIBRARIES ${GLIB2_LDFLAGS} ${GIO_LDFLAGS} ${PMLOG_LDFLAGS} ${NYXLIB_LDFLAGS} -lsuspend -lm -lrt -lpthread)
+                       LIBRARIES ${GLIB2_LDFLAGS} ${GIO_LDFLAGS} ${PMLOG_LDFLAGS} ${NYXLIB_LDFLAGS} -lm -lrt -lpthread)
