@@ -95,10 +95,6 @@ if(NOT NYXMOD_OW_DEVICEINFO)
 	add_subdirectory(device_info)
 endif()
 
-if(NOT NYXMOD_OW_SYSTEM)
-	add_subdirectory(system)
-endif()
-
 if(NOT NYXMOD_OW_HAPTICS)
 	add_subdirectory(haptics)
 endif()
