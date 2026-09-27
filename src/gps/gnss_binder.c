@@ -20,7 +20,8 @@
  * Why binder and not libhybris: the legacy gps.h HAL reached through
  * hw_get_module() only exists pre-Treble. On the Halium bases LuneOS targets,
  * GNSS is a HIDL service on /dev/hwbinder, exactly as the lights HAL is (see
- * the note in led_controller.c). This module is therefore a HIDL client and
+ * the note in nyx-modules' led_controller.c, which now owns that light for
+ * every machine). This module is therefore a HIDL client and
  * joins the ones LuneOS already runs - ofono-binder-plugin, bluebinder,
  * sensorfw, nfcd-binder-plugin.
  *
