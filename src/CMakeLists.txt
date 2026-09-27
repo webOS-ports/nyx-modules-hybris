@@ -87,10 +87,6 @@ endmacro()
 
 # only include the module if it wasn't built with native Nyx module
 
-if(NOT NYXMOD_OW_LED)
-	add_subdirectory(led_controller)
-endif()
-
 if(NOT NYXMOD_OW_DEVICEINFO)
 	add_subdirectory(device_info)
 endif()
