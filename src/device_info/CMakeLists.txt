@@ -19,7 +19,7 @@
 include_directories(.)
 
 webos_build_nyx_module(DeviceInfoMain 
-                       SOURCES device_info.c
+                       SOURCES device_info.c wifi_hwaddr.c
                        LIBRARIES ${GLIB2_LDFLAGS} ${PMLOG_LDFLAGS} ${LIBCRYPTO_LDFLAGS} -landroid-properties)
 # FIXME once we have updated to a newer libhybris version we should use the pkgconfig file
 # for libandroid-properties

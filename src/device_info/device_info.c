@@ -16,6 +16,7 @@
 *
 * LICENSE@@@ */
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,6 +32,7 @@
 #include <nyx/module/nyx_log.h>
 #include <hybris/properties/properties.h>
 #include "msgid.h"
+#include "wifi_hwaddr.h"
 
 struct device_info {
 	nyx_device_t base;
@@ -38,11 +40,46 @@ struct device_info {
 	char *board_type;
 	char *nduid;
 	char *wifi_mac_address;
+	/* wifi_mac_address came from connman's record, so it is final */
+	bool wifi_mac_is_hardware;
 	char *bt_mac_address;
 	char *modem_present;
 };
 
 #define MAC_ADDRESS_NUM_OCTETS		6
+
+/* The address the interface has now, as "AA:BB:CC:DD:EE:FF". */
+static int read_live_wifi_mac(const char *ifname, char *out, unsigned int out_len)
+{
+	char mac[WIFI_HWADDR_STR_LEN];
+	struct ifreq req;
+	int n, sock;
+
+	if (out_len < sizeof(mac))
+		return -1;
+
+	memset(&req, 0, sizeof(req));
+	g_strlcpy(req.ifr_name, ifname, IFNAMSIZ);
+
+	sock = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+	if (sock < 0)
+		return -1;
+
+	if (ioctl(sock, SIOCGIFHWADDR, &req) < 0) {
+		close(sock);
+		return -1;
+	}
+	close(sock);
+
+	for (n = 0; n < MAC_ADDRESS_NUM_OCTETS; n++) {
+		g_snprintf(&mac[(size_t) n * 3], 4, "%02X%s",
+				 (unsigned char) req.ifr_hwaddr.sa_data[n],
+				 (n < (MAC_ADDRESS_NUM_OCTETS - 1)) ? ":" : "");
+	}
+
+	g_strlcpy(out, mac, out_len);
+	return 0;
+}
 
 nyx_error_t device_info_query(nyx_device_handle_t device,
 				nyx_device_info_type_t query, const char **dest)
@@ -146,46 +183,42 @@ nyx_error_t device_info_query(nyx_device_handle_t device,
 		break;
 
 	case NYX_DEVICE_INFO_WIFI_ADDR:
-		if (dinfo->wifi_mac_address == NULL) {
-			struct ifreq req;
-			int n, sock;
+		/*
+		 * With per-network MAC addresses the interface carries the
+		 * network's own address while connected, so prefer the hardware
+		 * address connman recorded. Until there is such a record, look
+		 * at the interface again on every query rather than keeping an
+		 * address that may have been a network's. The buffer is reused,
+		 * so a pointer handed out earlier stays valid.
+		 */
+		if (!dinfo->wifi_mac_is_hardware) {
+			char mac[WIFI_HWADDR_STR_LEN];
+			int from;
 
-			memset(&req, 0, sizeof(req));
 			property_get("wifi.interface", value, "");
 			if (strlen(value) == 0) {
 				/* property doesn't exist or isn't filled so we will never get more
 				 * information here */
-				dinfo->wifi_mac_address = g_strdup("");
 				break;
 			}
 
-			sock = socket(AF_INET, SOCK_DGRAM, 0);
-			if (sock < 0) {
+			from = wifi_hwaddr_get(WIFI_HWADDR_DIR, value, WIFI_HWADDR_OWNER,
+					       mac, sizeof(mac), read_live_wifi_mac);
+			if (from < 0) {
 				error = NYX_ERROR_INVALID_OPERATION;
 				break;
 			}
 
-			g_strlcpy(req.ifr_name, value, IFNAMSIZ);
-			if (ioctl(sock, SIOCGIFHWADDR, &req) < 0) {
-				close(sock);
-				error = NYX_ERROR_INVALID_OPERATION;
-				break;
-			}
-
-			dinfo->wifi_mac_address = (char*) malloc(32);
 			if (dinfo->wifi_mac_address == NULL) {
-				close(sock);
-				error = NYX_ERROR_OUT_OF_MEMORY;
-				break;
+				dinfo->wifi_mac_address = (char*) malloc(WIFI_HWADDR_STR_LEN);
+				if (dinfo->wifi_mac_address == NULL) {
+					error = NYX_ERROR_OUT_OF_MEMORY;
+					break;
+				}
 			}
 
-			for (n = 0; n < MAC_ADDRESS_NUM_OCTETS; n++) {
-				g_snprintf(&dinfo->wifi_mac_address[(size_t) n * 3], 4, "%02X%s",
-						 (unsigned char) req.ifr_hwaddr.sa_data[n],
-						 (n < (MAC_ADDRESS_NUM_OCTETS - 1)) ? ":" : "");
-			}
-
-			close(sock);
+			g_strlcpy(dinfo->wifi_mac_address, mac, WIFI_HWADDR_STR_LEN);
+			dinfo->wifi_mac_is_hardware = (from == WIFI_HWADDR_FROM_RECORD);
 		}
 
 		*dest = dinfo->wifi_mac_address;
