@@ -25,3 +25,5 @@ webos_build_nyx_module(DeviceInfoMain
 # for libandroid-properties
 # target_link_libraries(DeviceInfoMain ${ANDROID_PROPERTIES_LDFLAGS} ${LIBCRYPTO_LDFLAGS})
 #target_link_libraries(DeviceInfoMain -landroid-properties ${LIBCRYPTO_LDFLAGS})
+
+add_subdirectory(tests)
