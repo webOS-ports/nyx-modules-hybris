@@ -31,6 +31,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <net/if.h>
+#include <net/if_arp.h>
 
 #include <nyx/nyx_module.h>
 #include <nyx/module/nyx_utils.h>
@@ -42,6 +43,7 @@ static char *test_dir;
 
 // What SIOCGIFHWADDR answers
 static unsigned char live_mac[6];
+static unsigned short live_family;
 static int live_fail;
 static int ioctl_calls;
 static char ioctl_ifname[IFNAMSIZ];
@@ -71,6 +73,7 @@ int test_ioctl(int fd, unsigned long request, ...)
 		errno = ENODEV;
 		return -1;
 	}
+	ifr->ifr_hwaddr.sa_family = live_family;
 	memcpy(ifr->ifr_hwaddr.sa_data, live_mac, sizeof(live_mac));
 	return 0;
 }
@@ -130,6 +133,7 @@ static void setup(void)
 	set_record("wlan1", NULL, 0);
 	g_strlcpy(wifi_interface, "wlan0", sizeof(wifi_interface));
 	memcpy(live_mac, mac, sizeof(mac));
+	live_family = ARPHRD_ETHER;
 	live_fail = 0;
 	ioctl_calls = 0;
 	ioctl_ifname[0] = '\0';
@@ -249,6 +253,43 @@ static void test_interface_failure(void)
 	g_assert_cmpstr(wifi_addr(NYX_ERROR_NONE), ==, "02:AA:BB:CC:DD:01");
 }
 
+// Only an Ethernet-type, unicast, non-zero interface address is reported
+static void test_bad_interface_addresses(void)
+{
+	static const unsigned char zero[6] = { 0 };
+	static const unsigned char multicast[6] = { 0x01, 0x00, 0x5e, 0x00, 0x00, 0x01 };
+	static const unsigned char broadcast[6] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+	static const unsigned char universal[6] = { 0x00, 0x1a, 0x2b, 0x3c, 0x4d, 0x5e };
+	const char *first;
+
+	setup();
+	live_family = ARPHRD_IEEE80211;
+	g_assert_cmpstr(wifi_addr(NYX_ERROR_INVALID_OPERATION), ==, "");
+
+	setup();
+	memcpy(live_mac, zero, sizeof(zero));
+	g_assert_cmpstr(wifi_addr(NYX_ERROR_INVALID_OPERATION), ==, "");
+
+	setup();
+	memcpy(live_mac, multicast, sizeof(multicast));
+	g_assert_cmpstr(wifi_addr(NYX_ERROR_INVALID_OPERATION), ==, "");
+
+	setup();
+	memcpy(live_mac, broadcast, sizeof(broadcast));
+	g_assert_cmpstr(wifi_addr(NYX_ERROR_INVALID_OPERATION), ==, "");
+
+	setup();
+	memcpy(live_mac, universal, sizeof(universal));
+	g_assert_cmpstr(wifi_addr(NYX_ERROR_NONE), ==, "00:1A:2B:3C:4D:5E");
+
+	// a rejected address does not overwrite the one handed out before
+	setup();
+	first = wifi_addr(NYX_ERROR_NONE);
+	memcpy(live_mac, zero, sizeof(zero));
+	g_assert_cmpstr(wifi_addr(NYX_ERROR_INVALID_OPERATION), ==, "");
+	g_assert_cmpstr(first, ==, "02:AA:BB:CC:DD:01");
+}
+
 static void test_get_info(void)
 {
 	char buf[18], small[17];
@@ -288,6 +329,8 @@ int main(int argc, char **argv)
 	g_test_add_func("/device_info/wifi_addr/pointer_stays_valid", test_pointer_stays_valid);
 	g_test_add_func("/device_info/wifi_addr/no_wifi_interface", test_no_wifi_interface);
 	g_test_add_func("/device_info/wifi_addr/interface_failure", test_interface_failure);
+	g_test_add_func("/device_info/wifi_addr/bad_interface_addresses",
+	                test_bad_interface_addresses);
 	g_test_add_func("/device_info/wifi_addr/get_info", test_get_info);
 	ret = g_test_run();
 

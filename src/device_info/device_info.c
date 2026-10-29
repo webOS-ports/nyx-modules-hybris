@@ -23,6 +23,7 @@
 #include <glib.h>
 #include <sys/ioctl.h>
 #include <net/if.h>
+#include <net/if_arp.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -48,10 +49,16 @@ struct device_info {
 
 #define MAC_ADDRESS_NUM_OCTETS		6
 
-/* The address the interface has now, as "AA:BB:CC:DD:EE:FF". */
+/*
+ * The address the interface has now, as "AA:BB:CC:DD:EE:FF". Only an
+ * Ethernet-type (802.11 shows as ARPHRD_ETHER) unicast address other than
+ * all zeroes is accepted, as for connman's record.
+ */
 static int read_live_wifi_mac(const char *ifname, char *out, unsigned int out_len)
 {
 	char mac[WIFI_HWADDR_STR_LEN];
+	const unsigned char *hw;
+	unsigned char any = 0;
 	struct ifreq req;
 	int n, sock;
 
@@ -71,9 +78,17 @@ static int read_live_wifi_mac(const char *ifname, char *out, unsigned int out_le
 	}
 	close(sock);
 
+	if (req.ifr_hwaddr.sa_family != ARPHRD_ETHER)
+		return -1;
+
+	hw = (const unsigned char *) req.ifr_hwaddr.sa_data;
+	for (n = 0; n < MAC_ADDRESS_NUM_OCTETS; n++)
+		any |= hw[n];
+	if (any == 0 || (hw[0] & 0x01) != 0)
+		return -1;
+
 	for (n = 0; n < MAC_ADDRESS_NUM_OCTETS; n++) {
-		g_snprintf(&mac[(size_t) n * 3], 4, "%02X%s",
-				 (unsigned char) req.ifr_hwaddr.sa_data[n],
+		g_snprintf(&mac[(size_t) n * 3], 4, "%02X%s", hw[n],
 				 (n < (MAC_ADDRESS_NUM_OCTETS - 1)) ? ":" : "");
 	}
 
