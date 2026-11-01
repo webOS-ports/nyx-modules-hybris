@@ -24,6 +24,7 @@ include(webOS/webOS)
 
 webos_modules_init(1 6 2)
 webos_component(1 0 0)
+webos_test_provider(GLIB_TEST)
 webos_include_install_paths()
 
 pkg_check_modules(PMLOG REQUIRED PmLogLib)
